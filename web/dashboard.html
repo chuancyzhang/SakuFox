@@ -106,11 +106,19 @@
           <div class="sidebar-section">
             <div class="section-header">
               <i class="fa-solid fa-floppy-disk"></i>
-              <h2>保存查询</h2>
+              <h2>沉淀技能</h2>
             </div>
-            <div class="save-skill-box">
-              <input id="skillNameInput" placeholder="命名当前查询..." />
-              <button id="saveSkillBtn" class="btn btn-outline btn-block">保存为技能</button>
+            <div class="save-skill-box" style="display:flex;flex-direction:column;gap:7px;">
+              <button id="proposeSkillBtn" class="btn btn-primary btn-block" style="margin-bottom:5px;"><i class="fa-solid fa-wand-magic-sparkles"></i> 将对话提炼为技能</button>
+              
+              <div id="skillFormFields" style="display:none; flex-direction:column; gap:7px; border-top:1px solid var(--border); padding-top:10px; margin-top:5px;">
+                <input id="skillNameInput" placeholder="技能名称（必填）" />
+                <textarea id="skillDescInput" rows="2" placeholder="一句话描述这个技能能做什么..." style="resize:none;border-radius:6px;border:1px solid var(--border);padding:7px 10px;font-size:13px;"></textarea>
+                <input id="skillTagsInput" placeholder="标签（逗号分隔）" />
+                <div style="font-size:12px;color:var(--text-muted);margin-top:2px;">业务知识（自动从会话提取，可补充）</div>
+                <textarea id="skillKnowledgeInput" rows="3" placeholder="业务规则、指标口径、字段说明..." style="resize:none;border-radius:6px;border:1px solid var(--border);padding:7px 10px;font-size:13px;"></textarea>
+                <button id="saveSkillBtn" class="btn btn-outline btn-block"><i class="fa-solid fa-bookmark"></i> 保存为技能</button>
+              </div>
             </div>
           </div>
 
@@ -121,6 +129,17 @@
             </div>
             <ul id="skillList" class="nav-list">
               <li class="empty-state">暂无沉淀技能</li>
+            </ul>
+          <div class="sidebar-section" style="border-top: 1px solid var(--border); padding-top: 10px;">
+            <div class="section-header" style="justify-content: space-between;">
+              <div style="display:flex;align-items:center;gap:6px;">
+                <i class="fa-solid fa-clock-rotate-left"></i>
+                <h2>历史对话</h2>
+              </div>
+              <button id="btnNewSession" class="icon-btn" title="新建对话"><i class="fa-solid fa-plus"></i></button>
+            </div>
+            <ul id="sessionList" class="nav-list" style="max-height: 280px; overflow-y: auto;">
+              <li class="empty-state">暂无历史对话</li>
             </ul>
           </div>
         </div>

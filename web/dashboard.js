@@ -2,12 +2,14 @@ let sessionId = "";
 let lastProposalId = "";
 let sandboxesData = [];
 let uploadedFiles = [];
+let currentEditingSkillId = ""; // skill being edited, or "" for create mode
 
 const userInfo = document.getElementById("userInfo");
 const tableList = document.getElementById("tableList");
 const sandboxSelect = document.getElementById("sandboxSelect");
 const cards = document.getElementById("cards");
 const skillList = document.getElementById("skillList");
+const sessionList = document.getElementById("sessionList");
 
 function scrollToBottom() {
   const chatContainer = document.querySelector(".chat-container");
@@ -73,10 +75,10 @@ async function refreshProfile(selectId = null) {
 
     const sandboxesRes = await api("/api/sandboxes");
     sandboxesData = sandboxesRes.sandboxes || [];
-    
+
     // Use selectId if provided, otherwise stick to current selection
     const currentSandboxId = selectId || sandboxSelect.value;
-    
+
     sandboxSelect.innerHTML = "";
     if (sandboxesData.length === 0) {
       const opt = document.createElement("option");
@@ -91,10 +93,10 @@ async function refreshProfile(selectId = null) {
         opt.textContent = s.name; // Removed the annoying [table] suffix
         sandboxSelect.appendChild(opt);
       });
-      
+
       // Restore selection if it still exists
       if (currentSandboxId && sandboxesData.find(s => s.sandbox_id === currentSandboxId)) {
-          sandboxSelect.value = currentSandboxId;
+        sandboxSelect.value = currentSandboxId;
       }
     }
 
@@ -106,95 +108,95 @@ async function refreshProfile(selectId = null) {
 }
 
 function renderDataModels() {
-    const currentSandboxId = sandboxSelect.value;
-    const btnRename = document.getElementById("btnRenameSandbox");
-    const btnDelete = document.getElementById("btnDeleteSandbox");
-    
-    if (currentSandboxId) {
-        btnRename.disabled = false;
-        btnDelete.disabled = false;
-    } else {
-        btnRename.disabled = true;
-        btnDelete.disabled = true;
-    }
+  const currentSandboxId = sandboxSelect.value;
+  const btnRename = document.getElementById("btnRenameSandbox");
+  const btnDelete = document.getElementById("btnDeleteSandbox");
 
-    const currentSandbox = sandboxesData.find(s => s.sandbox_id === currentSandboxId);
-    
-    tableList.innerHTML = "";
-    let hasItems = false;
-    
-    // 1. Render DB Tables from current sandbox
-    if (currentSandbox && currentSandbox.tables && currentSandbox.tables.length > 0) {
-        hasItems = true;
-        currentSandbox.tables.forEach(t => {
-            const div = document.createElement("div");
-            div.style.marginBottom = "6px";
-            div.style.marginTop = "6px";
-            div.style.paddingLeft = "16px";
-            
-            const cb = document.createElement("input");
-            cb.type = "checkbox";
-            cb.value = t;
-            cb.id = `chk_table_${t}`;
-            cb.style.marginRight = "6px";
-            cb.className = "db-table-checkbox-sidebar";
-            cb.checked = true;
-            
-            const label = document.createElement("label");
-            label.htmlFor = `chk_table_${t}`;
-            label.style.cursor = "pointer";
-            label.style.fontSize = "13px";
-            label.innerHTML = `<i class="fa-solid fa-table-columns" style="color:#3b82f6;"></i> ${t}`;
-            
-            div.appendChild(cb);
-            div.appendChild(label);
-            tableList.appendChild(div);
-        });
-    }
-    
-    // 2. Render Uploaded files
-    if (uploadedFiles && uploadedFiles.length > 0) {
-        hasItems = true;
-        uploadedFiles.forEach(f => {
-            const div = document.createElement("div");
-            div.style.marginBottom = "6px";
-            div.style.marginTop = "6px";
-            div.style.paddingLeft = "16px";
-            const cb = document.createElement("input");
-            cb.type = "checkbox";
-            cb.value = f.dataset_name;
-            cb.id = `chk_file_${f.dataset_name}`;
-            cb.style.marginRight = "6px";
-            cb.className = "uploaded-file-checkbox";
-            cb.checked = true;
-            
-            const label = document.createElement("label");
-            label.htmlFor = `chk_file_${f.dataset_name}`;
-            label.style.cursor = "pointer";
-            label.style.fontSize = "13px";
-            
-            let text = f.dataset_name;
-            if (f.is_tabular) {
-                text += ` (${f.rows}行)`;
-            } else {
-                text += ` (知识文档)`;
-            }
-            label.innerHTML = `<i class="fa-solid fa-file-csv" style="color:#10b981;"></i> ${text}`;
-            label.title = f.is_tabular ? `列: ${f.columns.join(", ")}` : "文档内容将在提问时交给AI分析";
-            
-            div.appendChild(cb);
-            div.appendChild(label);
-            tableList.appendChild(div);
-        });
-    }
-    
-    if (!hasItems) {
-        tableList.innerHTML = '<li class="empty-state" style="padding-left:16px;">当前沙盒无数据模型</li>';
-    }
+  if (currentSandboxId) {
+    btnRename.disabled = false;
+    btnDelete.disabled = false;
+  } else {
+    btnRename.disabled = true;
+    btnDelete.disabled = true;
+  }
+
+  const currentSandbox = sandboxesData.find(s => s.sandbox_id === currentSandboxId);
+
+  tableList.innerHTML = "";
+  let hasItems = false;
+
+  // 1. Render DB Tables from current sandbox
+  if (currentSandbox && currentSandbox.tables && currentSandbox.tables.length > 0) {
+    hasItems = true;
+    currentSandbox.tables.forEach(t => {
+      const div = document.createElement("div");
+      div.style.marginBottom = "6px";
+      div.style.marginTop = "6px";
+      div.style.paddingLeft = "16px";
+
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.value = t;
+      cb.id = `chk_table_${t}`;
+      cb.style.marginRight = "6px";
+      cb.className = "db-table-checkbox-sidebar";
+      cb.checked = true;
+
+      const label = document.createElement("label");
+      label.htmlFor = `chk_table_${t}`;
+      label.style.cursor = "pointer";
+      label.style.fontSize = "13px";
+      label.innerHTML = `<i class="fa-solid fa-table-columns" style="color:#3b82f6;"></i> ${t}`;
+
+      div.appendChild(cb);
+      div.appendChild(label);
+      tableList.appendChild(div);
+    });
+  }
+
+  // 2. Render Uploaded files
+  if (uploadedFiles && uploadedFiles.length > 0) {
+    hasItems = true;
+    uploadedFiles.forEach(f => {
+      const div = document.createElement("div");
+      div.style.marginBottom = "6px";
+      div.style.marginTop = "6px";
+      div.style.paddingLeft = "16px";
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.value = f.dataset_name;
+      cb.id = `chk_file_${f.dataset_name}`;
+      cb.style.marginRight = "6px";
+      cb.className = "uploaded-file-checkbox";
+      cb.checked = true;
+
+      const label = document.createElement("label");
+      label.htmlFor = `chk_file_${f.dataset_name}`;
+      label.style.cursor = "pointer";
+      label.style.fontSize = "13px";
+
+      let text = f.dataset_name;
+      if (f.is_tabular) {
+        text += ` (${f.rows}行)`;
+      } else {
+        text += ` (知识文档)`;
+      }
+      label.innerHTML = `<i class="fa-solid fa-file-csv" style="color:#10b981;"></i> ${text}`;
+      label.title = f.is_tabular ? `列: ${f.columns.join(", ")}` : "文档内容将在提问时交给AI分析";
+
+      div.appendChild(cb);
+      div.appendChild(label);
+      tableList.appendChild(div);
+    });
+  }
+
+  if (!hasItems) {
+    tableList.innerHTML = '<li class="empty-state" style="padding-left:16px;">当前沙盒无数据模型</li>';
+  }
 }
 
 sandboxSelect.addEventListener('change', () => {
-    renderDataModels();
+  renderDataModels();
 });
 
 async function refreshSkills() {
@@ -205,10 +207,201 @@ async function refreshSkills() {
   } else {
     skills.skills.forEach((s) => {
       const li = document.createElement("li");
-      li.innerHTML = `<div style="font-weight:500">${s.name}</div><div style="font-size:12px;color:var(--text-muted);margin-top:2px"><i class="fa-solid fa-database"></i> ${s.inherited_tables.join(", ")}</div>`;
+      li.style.cursor = "pointer";
+      li.title = "点击查看/修改技能";
+      const tagsHtml = (s.tags || []).map(t => `<span style="background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:1px 6px;font-size:11px;">${escapeHtml(t)}</span>`).join(" ");
+      const tableStr = (s.inherited_tables || []).join(", ");
+      li.innerHTML = `
+        <div style="font-weight:500;display:flex;justify-content:space-between;align-items:center;">
+          <span>${escapeHtml(s.name)}</span>
+          <i class="fa-solid fa-pen-to-square" style="font-size:11px;color:var(--text-muted);"></i>
+        </div>
+      `;
+      li.onclick = () => loadSkillIntoForm(s.skill_id, s);
       skillList.appendChild(li);
     });
   }
+}
+
+function loadSkillIntoForm(skillId, skill) {
+  currentEditingSkillId = skillId;
+  
+  const formFields = document.getElementById("skillFormFields");
+  if (formFields) formFields.style.display = "flex";
+
+  // Populate form
+  document.getElementById("skillNameInput").value = skill.name || "";
+  if (document.getElementById("skillDescInput")) document.getElementById("skillDescInput").value = skill.description || "";
+  if (document.getElementById("skillTagsInput")) document.getElementById("skillTagsInput").value = (skill.tags || []).join(", ");
+  // Knowledge from layers.knowledge
+  const knowledge = (skill.layers?.knowledge || []).join("\n");
+  if (document.getElementById("skillKnowledgeInput")) document.getElementById("skillKnowledgeInput").value = knowledge;
+
+  // Switch button label to edit mode
+  const btn = document.getElementById("saveSkillBtn");
+  btn.innerHTML = '<i class="fa-solid fa-pen-to-square"></i> 更新技能';
+  btn.style.borderColor = "var(--accent, #6366f1)";
+
+  // Add cancel link if not already present
+  let cancelLink = document.getElementById("skillEditCancelLink");
+  if (!cancelLink) {
+    cancelLink = document.createElement("a");
+    cancelLink.id = "skillEditCancelLink";
+    cancelLink.href = "#";
+    cancelLink.style.cssText = "font-size:12px;color:var(--text-muted);text-align:center;display:block;margin-top:4px;";
+    cancelLink.textContent = "取消编辑";
+    cancelLink.onclick = (e) => { e.preventDefault(); cancelSkillEdit(); };
+    btn.parentNode.insertBefore(cancelLink, btn.nextSibling);
+  }
+
+  // Scroll right sidebar form into view
+  document.getElementById("skillNameInput").scrollIntoView({ behavior: "smooth", block: "center" });
+  document.getElementById("skillNameInput").focus();
+}
+
+function cancelSkillEdit() {
+  currentEditingSkillId = "";
+  document.getElementById("skillNameInput").value = "";
+  if (document.getElementById("skillDescInput")) document.getElementById("skillDescInput").value = "";
+  if (document.getElementById("skillTagsInput")) document.getElementById("skillTagsInput").value = "";
+  if (document.getElementById("skillKnowledgeInput")) document.getElementById("skillKnowledgeInput").value = "";
+  const btn = document.getElementById("saveSkillBtn");
+  btn.innerHTML = '<i class="fa-solid fa-bookmark"></i> 保存为技能';
+  btn.style.borderColor = "";
+  const cancelLink = document.getElementById("skillEditCancelLink");
+  if (cancelLink) cancelLink.remove();
+}
+
+async function refreshSessions() {
+  if (!sessionList) return;
+  try {
+    const res = await api("/api/chat/sessions");
+    sessionList.innerHTML = "";
+    if (!res.sessions || res.sessions.length === 0) {
+      sessionList.innerHTML = '<li class="empty-state">暂无历史对话</li>';
+      return;
+    }
+    res.sessions.forEach(sess => {
+      const li = document.createElement("li");
+      li.style.cssText = "cursor:pointer;padding:8px 10px;border-radius:6px;position:relative;";
+      if (sess.session_id === sessionId) {
+        li.style.background = "var(--bg-hover, #f0f4ff)";
+        li.style.fontWeight = "600";
+      }
+      const date = sess.created_at ? new Date(sess.created_at).toLocaleDateString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }) : "";
+      li.innerHTML = `
+        <div style="font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(sess.title || '新对话')}</div>
+        <div style="font-size:11px;color:var(--text-muted);display:flex;justify-content:space-between;margin-top:2px;">
+          <span><i class="fa-solid fa-comments"></i> ${sess.iteration_count}轮</span>
+          <span>${date}</span>
+        </div>
+      `;
+      li.onclick = () => switchSession(sess.session_id);
+      sessionList.appendChild(li);
+    });
+  } catch (e) {
+    console.error("refreshSessions error", e);
+  }
+}
+
+async function switchSession(targetSessionId) {
+  if (targetSessionId === sessionId) return;
+  sessionId = targetSessionId;
+  lastProposalId = "";
+
+  cards.innerHTML = '<div style="padding:20px;color:var(--text-muted);text-align:center;"><i class="fa-solid fa-spinner fa-spin"></i> 加载历史对诚...</div>';
+  refreshSessions();
+
+  try {
+    const res = await api(`/api/chat/history?session_id=${targetSessionId}`);
+    cards.innerHTML = "";
+    if (!res.iterations || res.iterations.length === 0) {
+      cards.innerHTML = '<div class="welcome-card"><h3>空对话</h3><p>该对话内无记录。</p></div>';
+      return;
+    }
+
+    res.iterations.forEach(iter => {
+      // 1. User message bubble
+      if (iter.message) addUserMessage(iter.message);
+
+      // 2. Render the AI analysis card (full replay)
+      const wrapper = createAiMessageContainer();
+
+      // -- Steps (SQL/Python code blocks) --
+      let stepsHtml = "";
+      const steps = iter.steps || [];
+      if (steps.length > 0) {
+        const stepsInner = steps.map((s, i) => {
+          const lang = s.tool === "sql" ? "sql" : "python";
+          const label = s.tool === "sql" ? `<i class="fa-solid fa-database"></i> SQL` : `<i class="fa-brands fa-python"></i> Python`;
+          return `<details style="margin-bottom:6px;">
+            <summary style="cursor:pointer;font-size:12px;font-weight:600;padding:4px 0;">步骤 ${i + 1}: ${label}</summary>
+            <pre style="font-size:12px;background:#1e1e1e;color:#d4d4d4;padding:12px;border-radius:6px;overflow:auto;max-height:200px;"><code>${escapeHtml(s.code || '')}</code></pre>
+          </details>`;
+        }).join("");
+        stepsHtml = `<div style="margin-bottom:12px;">${stepsInner}</div>`;
+      }
+
+      // -- Data rows preview --
+      let dataHtml = "";
+      if (iter.result_rows && iter.result_rows.length > 0) {
+        dataHtml = `<details style="margin-bottom:12px;border:1px solid var(--border);border-radius:6px;overflow:hidden;">
+          <summary style="background:#f8f9fa;padding:8px 14px;cursor:pointer;font-size:13px;font-weight:600;">查看原始数据 (${iter.result_rows.length} 行)</summary>
+          <div>${jsonToTable(iter.result_rows)}</div>
+        </details>`;
+      }
+
+      // -- Charts --
+      let chartsHtml = "";
+      if (iter.chart_specs && iter.chart_specs.length > 0) {
+        iter.chart_specs.forEach((spec, ci) => {
+          const cid = `hist_chart_${targetSessionId}_${iter.iteration_id || ci}_${ci}`;
+          chartsHtml += `<div id="${cid}" style="height:280px;width:100%;margin-bottom:12px;"></div>`;
+          setTimeout(() => {
+            const dom = document.getElementById(cid);
+            if (dom && spec) {
+              const chart = echarts.init(dom);
+              chart.setOption(spec);
+            }
+          }, 100);
+        });
+      }
+
+      // -- Conclusions --
+      let conclusionsHtml = "";
+      if (iter.conclusions && iter.conclusions.length > 0) {
+        conclusionsHtml = `<div style="margin-bottom:12px;">${iter.conclusions.map(c =>
+          `<div style="margin-bottom:6px;">• ${escapeHtml(c.text || '')} <span style="font-size:11px;color:#64748b;">（置信度 ${Math.round((c.confidence || 1) * 100)}%）</span></div>`
+        ).join("")}</div>`;
+      }
+
+      // -- Hypotheses --
+      let hypothesesHtml = "";
+      if (iter.hypotheses && iter.hypotheses.length > 0) {
+        hypothesesHtml = `<details style="margin-top:8px;">
+          <summary style="cursor:pointer;font-size:12px;font-weight:600;color:var(--text-muted);"><i class="fa-solid fa-flask"></i> 待验证猜想 (${iter.hypotheses.length})</summary>
+          ${iter.hypotheses.map(h => `<div style="font-size:12px;padding:4px 0;"> • ${escapeHtml(h.text || '')}</div>`).join("")}
+        </details>`;
+      }
+
+      updateAiCard(wrapper, "分析结论", stepsHtml + dataHtml + chartsHtml + conclusionsHtml + hypothesesHtml);
+    });
+  } catch (e) {
+    cards.innerHTML = `<div style="padding:20px;color:#ef4444;">加载失败: ${escapeHtml(e.message)}</div>`;
+  }
+}
+
+function startNewSession() {
+  sessionId = "";
+  lastProposalId = "";
+  cards.innerHTML = `
+    <div class="welcome-card">
+      <div class="icon-wrapper"><i class="fa-solid fa-magnifying-glass-chart fa-3x"></i></div>
+      <h3>开始你的数据探索</h3>
+      <p>输入分析需求，AI 将自主取数、分析、输出结论与猜想。</p>
+    </div>
+  `;
+  refreshSessions();
 }
 
 function parseProviderDirective(rawValue) {
@@ -383,12 +576,12 @@ async function handleSend(hypothesisId = null) {
 
   // 2. Standard Iteration loop
   const directive = parseProviderDirective(rawValue);
-  
+
   const checkedFiles = Array.from(document.querySelectorAll(".uploaded-file-checkbox:checked"))
-                           .map(cb => cb.value);
+    .map(cb => cb.value);
 
   const checkedTables = Array.from(document.querySelectorAll(".db-table-checkbox-sidebar:checked"))
-                           .map(cb => cb.value);
+    .map(cb => cb.value);
 
   const reqBody = {
     sandbox_id: sandboxId,
@@ -473,6 +666,8 @@ async function handleSend(hypothesisId = null) {
               renderIterationResult(finalResultData, wrapper, accumulatedThought, chartContainers, dataRowsHtml);
             }
             autoCompleted = true;
+            // Auto-refresh session list so current session appears immediately
+            refreshSessions();
           } else if (data.type === "error") {
             updateAiCard(wrapper, "分析出错", `<div style="color: #ef4444">${data.message}</div>`, accumulatedThought);
           }
@@ -501,25 +696,48 @@ document.getElementById("questionInput").onkeydown = (e) => {
 document.getElementById("saveSkillBtn").onclick = async () => {
   try {
     const name = document.getElementById("skillNameInput").value.trim();
-    if (!name) {
-      alert("请输入技能名称");
-      return;
+    if (!name) { alert("请输入技能名称"); return; }
+
+    const desc = document.getElementById("skillDescInput")?.value.trim() || "";
+    const tagsRaw = document.getElementById("skillTagsInput")?.value.trim() || "";
+    const tags = tagsRaw ? tagsRaw.split(/[,，]/).map(t => t.trim()).filter(Boolean) : [];
+    const knowledgeRaw = document.getElementById("skillKnowledgeInput")?.value.trim() || "";
+    const knowledge = knowledgeRaw ? knowledgeRaw.split("\n").map(l => l.trim()).filter(Boolean) : [];
+
+    if (currentEditingSkillId) {
+      // --- UPDATE existing skill ---
+      const data = await api(`/api/skills/${currentEditingSkillId}`, {
+        method: "PATCH",
+        body: JSON.stringify({ name, description: desc, tags, knowledge }),
+      });
+      addCard("技能已更新", `<div>成功更新：<strong>${escapeHtml(data.name || name)}</strong>${desc ? `<div style="font-size:12px;color:var(--text-muted);margin-top:4px;">${escapeHtml(desc)}</div>` : ''}</div>`);
+      cancelSkillEdit();
+    } else {
+      // --- CREATE new skill from proposal ---
+      if (!lastProposalId) { alert("暂无成功执行的迭代记录可保存"); return; }
+      const data = await api("/api/skills/save", {
+        method: "POST",
+        body: JSON.stringify({
+          proposal_id: lastProposalId,
+          name,
+          description: desc,
+          tags,
+          knowledge,
+        }),
+      });
+      addCard("技能已沉淀", `<div>成功保存：<strong>${data.skill.name}</strong>${desc ? `<div style="font-size:12px;color:var(--text-muted);margin-top:4px;">${escapeHtml(desc)}</div>` : ''}</div>`);
+      document.getElementById("skillNameInput").value = "";
+      if (document.getElementById("skillDescInput")) document.getElementById("skillDescInput").value = "";
+      if (document.getElementById("skillTagsInput")) document.getElementById("skillTagsInput").value = "";
+      if (document.getElementById("skillKnowledgeInput")) document.getElementById("skillKnowledgeInput").value = "";
     }
-    if (!lastProposalId) {
-      alert("暂无成功执行的迭代记录可保存");
-      return;
-    }
-    const data = await api("/api/skills/save", {
-      method: "POST",
-      body: JSON.stringify({ proposal_id: lastProposalId, name }),
-    });
-    addCard("技能已沉淀", `<div>成功保存分析链路：<strong>${data.skill.name}</strong></div>`);
-    document.getElementById("skillNameInput").value = "";
     await refreshSkills();
   } catch (e) {
-    addCard("保存技能失败", `<div style="color: #ef4444">${e.message}</div>`);
+    addCard("操作失败", `<div style="color: #ef4444">${e.message}</div>`);
   }
 };
+
+document.getElementById("btnNewSession")?.addEventListener("click", startNewSession);
 
 document.getElementById("uploadBtn").onclick = async () => {
   try {
@@ -528,7 +746,7 @@ document.getElementById("uploadBtn").onclick = async () => {
       alert("请先选择文件");
       return;
     }
-    
+
     // Disable button to prevent double-click
     const btn = document.getElementById("uploadBtn");
     const originalText = btn.innerHTML;
@@ -537,9 +755,9 @@ document.getElementById("uploadBtn").onclick = async () => {
 
     const form = new FormData();
     for (let i = 0; i < input.files.length; i++) {
-        form.append("files", input.files[i]);
+      form.append("files", input.files[i]);
     }
-    
+
     if (sessionId) form.append("session_id", sessionId);
 
     const token = localStorage.getItem("token");
@@ -551,28 +769,28 @@ document.getElementById("uploadBtn").onclick = async () => {
 
     const data = await res.json();
     if (data.session_id) {
-        sessionId = data.session_id;
+      sessionId = data.session_id;
     }
-    
+
     if (data.uploaded_files && data.uploaded_files.length > 0) {
-        data.uploaded_files.forEach(f => {
-            const existingIdx = uploadedFiles.findIndex(uf => uf.dataset_name === f.dataset_name);
-            if (existingIdx >= 0) {
-                uploadedFiles[existingIdx] = f;
-            } else {
-                uploadedFiles.push(f);
-            }
-            // Log to chat
-            addCard("文件上传成功", `<div>文件名：${f.dataset_name}</div>${f.is_tabular ? `<div>行数：${f.rows}</div><div>字段：${f.columns.join(", ")}</div>` : '<div>类型：纯文档/业务知识</div>'}<div>(已自动作为分析上下文)</div>`);
-        });
-        
-        renderDataModels();
+      data.uploaded_files.forEach(f => {
+        const existingIdx = uploadedFiles.findIndex(uf => uf.dataset_name === f.dataset_name);
+        if (existingIdx >= 0) {
+          uploadedFiles[existingIdx] = f;
+        } else {
+          uploadedFiles.push(f);
+        }
+        // Log to chat
+        addCard("文件上传成功", `<div>文件名：${f.dataset_name}</div>${f.is_tabular ? `<div>行数：${f.rows}</div><div>字段：${f.columns.join(", ")}</div>` : '<div>类型：纯文档/业务知识</div>'}<div>(已自动作为分析上下文)</div>`);
+      });
+
+      renderDataModels();
     }
 
     input.value = "";
     btn.innerHTML = originalText;
     btn.disabled = false;
-    
+
     // Close modal on success
     document.getElementById("uploadModal").style.display = "none";
   } catch (e) {
@@ -587,11 +805,11 @@ const openUploadModalBtn = document.getElementById("openUploadModalBtn");
 const closeUploadModalBtn = document.getElementById("closeUploadModalBtn");
 
 openUploadModalBtn.onclick = () => {
-    uploadModal.style.display = "flex";
+  uploadModal.style.display = "flex";
 };
 
 closeUploadModalBtn.onclick = () => {
-    uploadModal.style.display = "none";
+  uploadModal.style.display = "none";
 };
 
 // ── External DB Connection Modal Logic ──────────────────────────────────────
@@ -601,11 +819,11 @@ const openDbModalBtn = document.getElementById("openDbModalBtn");
 const closeDbModalBtn = document.getElementById("closeDbModalBtn");
 
 openDbModalBtn.onclick = () => {
-    dbModal.style.display = "flex";
+  dbModal.style.display = "flex";
 };
 
 closeDbModalBtn.onclick = () => {
-    dbModal.style.display = "none";
+  dbModal.style.display = "none";
 };
 
 // Close modal when clicking outside
@@ -677,7 +895,7 @@ document.getElementById("dbRegisterBtn").onclick = async () => {
     dbMsg.innerHTML = '<span style="color:red">请输入 DB Name (或 SQLite 绝对路径)</span>';
     return;
   }
-  
+
   dbMsg.innerHTML = '<span style="color:gray"><i class="fa-solid fa-spinner fa-spin"></i> 正在连接...</span>';
   tableContainer.style.display = "none";
 
@@ -688,7 +906,7 @@ document.getElementById("dbRegisterBtn").onclick = async () => {
     });
     dbMsg.innerHTML = '<span style="color:green"><i class="fa-solid fa-check"></i> 连接成功，请选择表</span>';
     document.getElementById("dbPassInput").value = "";
-    
+
     // Disable inputs so user just checks tables
     document.getElementById("dbTypeInput").disabled = true;
     document.getElementById("dbHostInput").disabled = true;
@@ -696,7 +914,7 @@ document.getElementById("dbRegisterBtn").onclick = async () => {
     document.getElementById("dbNameInput").disabled = true;
     document.getElementById("dbUserInput").disabled = true;
     document.getElementById("dbPassInput").disabled = true;
-    
+
     // Switch buttons
     dbTestBtn.style.display = "none";
     dbRegisterBtn.style.display = "none";
@@ -762,14 +980,14 @@ document.getElementById("dbSaveTablesBtn").onclick = async () => {
     });
     // Refetch the sandbox tables to update the left sidebar immediately
     await refreshProfile();
-    
+
     // Add an AI notification card to prompt the user
     addCard("关联数据成功", `<div style="color: #10b981; font-weight: 500;"><i class="fa-solid fa-circle-check"></i> 已成功关联外部表：${selectedTables.join(", ")}</div><div style="margin-top: 8px; font-size: 14px; color: #374151;">您可以开始在聊天框中输入业务知识或分析目标了。在迭代中 AI 会自动查询这些外部表的数据。</div>`);
 
     // Hide the table panel and modal after success
     document.getElementById("dbTablesContainer").style.display = "none";
     dbModal.style.display = "none";
-    
+
     // Reset buttons
     document.getElementById("dbTestBtn").style.display = "block";
     document.getElementById("dbRegisterBtn").style.display = "none";
@@ -798,7 +1016,7 @@ document.getElementById("dbTypeInput").dispatchEvent(new Event("change"));
 document.getElementById("btnNewSandbox").onclick = async () => {
   const name = prompt("请输入新分析空间的名称：", "我的新数据空间");
   if (!name) return;
-  
+
   try {
     const res = await api("/api/sandboxes", {
       method: "POST",
@@ -892,3 +1110,69 @@ function setupSidebar(sidebarId, resizerId, toggleBtnId, direction) {
 }
 setupSidebar("leftSidebar", "resizerLeft", "toggleLeftBtn", "left");
 setupSidebar("rightSidebar", "resizerRight", "toggleRightBtn", "right");
+
+// ── Initial data load ──────────────────────────────────────────────────
+refreshSkills();
+refreshSessions();
+
+document.getElementById("proposeSkillBtn").onclick = () => {
+    // Get the last user message from the DOM
+    const userBubbles = document.querySelectorAll(".user-bubble");
+    const lastMsg = userBubbles.length > 0 ? userBubbles[userBubbles.length - 1].innerText : "";
+    proposeSkillMetadata(lastProposalId, lastMsg);
+};
+
+async function proposeSkillMetadata(proposalId, userMessage) {
+  if (!proposalId) {
+    alert("请先进行数据对话，再提炼技能。");
+    return;
+  }
+
+  const formFields = document.getElementById("skillFormFields");
+  if (formFields) formFields.style.display = "flex";
+
+  const nameInput = document.getElementById("skillNameInput");
+  const descInput = document.getElementById("skillDescInput");
+  const tagsInput = document.getElementById("skillTagsInput");
+  const knowledgeInput = document.getElementById("skillKnowledgeInput");
+
+  // Clear previous values
+  if (nameInput) nameInput.value = "";
+  if (descInput) descInput.value = "";
+  if (tagsInput) tagsInput.value = "";
+  if (knowledgeInput) knowledgeInput.value = "";
+
+  // Show loading state
+  if (nameInput) nameInput.placeholder = "AI 正在思考技能名称...";
+  if (descInput) descInput.placeholder = "AI 正在提取功能描述...";
+  if (tagsInput) tagsInput.placeholder = "AI 正在生成标签...";
+  if (knowledgeInput) knowledgeInput.placeholder = "AI 正在提炼业务知识...";
+
+  const sandboxId = sandboxSelect.value;
+
+  try {
+    const data = await api("/api/skills/propose", {
+      method: "POST",
+      body: JSON.stringify({
+        proposal_id: proposalId,
+        message: userMessage,
+        sandbox_id: sandboxId
+      })
+    });
+
+    if (data.name && nameInput) nameInput.value = data.name;
+    if (data.description && descInput) descInput.value = data.description;
+    if (data.tags && tagsInput) tagsInput.value = data.tags.join(", ");
+    if (data.knowledge && knowledgeInput) knowledgeInput.value = data.knowledge.join("\n");
+
+  } catch (e) {
+    console.warn("Auto propose skill metadata failed", e);
+    alert("提炼失败: " + e.message);
+  } finally {
+    // Reset placeholders
+    if (nameInput) nameInput.placeholder = "技能名称 (必填)";
+    if (descInput) descInput.placeholder = "一句话描述这个技能能做什么...";
+    if (tagsInput) tagsInput.placeholder = "标签 (逗号分隔)";
+    if (knowledgeInput) knowledgeInput.placeholder = "业务规则、指标口径、字段说明...";
+  }
+}

@@ -1,8 +1,8 @@
-# SakuFox 🦊: The Agile Intelligent Data Analyst
+# SakuFox 🦊: Agentic HITL Data Analytics Platform
 
 > **Saku (樱花) for elegance, Fox (狐狸) for precision. Catching core insights from your data with ninja-like agility.**
 
-SakuFox is a robust, secure, and interactive data workspace. Inspired by the resilience of the cherry blossom (from *Dragon Raja*'s Sakurakoji) and the sharp intuition of a fox, it transforms complex multi-source data into crystal-clear insights using an advanced agentic core.
+SakuFox is an interactive data analysis platform based on Agentic autonomous agents and Human-in-the-Loop (HITL). It transforms natural language into interpretable SQL within a restricted business domain, allowing users to refine AI logic through interaction and precipitate it into reusable business skills.
 
 ![intro](images/preview.png)
 ![intro](images/usage.png)
@@ -11,27 +11,23 @@ SakuFox is a robust, secure, and interactive data workspace. Inspired by the res
 
 ## ✨ Key Features
 
+### 🧠 **Human-in-the-Loop (HITL) Iteration**
+Interactive analytical loop. Users can provide feedback (e.g., "Knowledge: ...") to correct AI reasoning mid-process, ensuring the final SQL and logic are perfectly aligned with business reality.
+
+### 🛠️ **Business Skill Precipitation**
+Transform one-off analyses into permanent assets. Once a path is verified, "Save as Skill" to automatically extract and store high-quality business rules, metrics, and SQL logic for zero-shot future reuse.
+
 ### 📁 **Persistent Workspaces (Sandboxes)**
-Move beyond ephemeral sessions. Create, name, and manage dedicated Workspaces for different projects.
-*   **Isolation**: Each workspace maintains its own set of database connections, uploaded files, and business knowledge.
-*   **Context Persistence**: Switch between workspaces without losing your analysis state.
+Move beyond ephemeral sessions. Create, name, and manage dedicated Workspaces for different projects, each with its own DB connections and knowledge base.
 
 ### 🔗 **Unified Data Context**
-Bring all your data sources into a single checkable context for the AI:
-*   **Multi-DB Support**: Connect to SQLite, PostgreSQL, and more via a unified connection modal.
-*   **Selective Schema**: Pick exactly which tables (up to 5) to expose to the LLM to maintain high precision and stay within context limits.
-*   **Large File Analysis**: Upload `CSV`, `Excel`, `JSON`, or `TXT` files. The backend stores them on disk and uses **Pandas** to analyze them natively, supporting millions of rows without truncation.
+*   **Multi-DB Support**: Connect to SQLite, MySQL, PostgreSQL, etc.
+*   **Selective Schema**: Pick specific tables to maintain high precision and stay within context limits.
+*   **Large File Analysis**: Native Pandas support for `CSV`, `Excel`, `JSON`, handling millions of rows efficiently.
 
-### 🧠 **Autonomous Iterative Agent**
-The agent doesn't just return a table; it performs a full analytical loop:
-*   **Thought Streaming**: Watch the AI's internal reasoning as it plans its approach.
-*   **Dual-Engine Logic**: The agent automatically chooses between **SQL** (for retrieval) and **Python** (for deep statistical processing and visualization).
-*   **Dynamic Visualizations**: Automatically generates interactive **ECharts** visualizations based on the data findings.
-
-### 🛡️ **Enterprise Security & Control**
-*   **Business Knowledge Persistence**: Supplement the AI's understanding with domain-specific rules that persist within the Workspace.
-*   **Permission Whitelisting**: Tables and documents are only accessible if they match the user's group permissions.
-*   **Sandbox Security**: Python code is executed in a controlled environment to ensure system stability.
+### 🛡️ **Enterprise Security**
+*   **Permission Whitelisting**: Data access is strictly controlled by user group permissions.
+*   **Secure Execution**: Python/SQL operations run in a controlled sandbox to protect infrastructure.
 
 ---
 

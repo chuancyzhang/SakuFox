@@ -128,6 +128,8 @@ class InMemoryStore:
                 "upload_paths": {},
                 "iterations": [],
                 "business_knowledge": [],
+                "title": "",  # auto-filled from first message
+                "sandbox_id": "",
                 "created_at": datetime.now(timezone.utc).isoformat(),
             }
             return new_id, user_sessions[new_id]
@@ -199,6 +201,42 @@ class InMemoryStore:
             self.proposals[proposal_id].update(updates)
             return self.proposals[proposal_id]
 
+    def list_sessions(self, user_id: str) -> list[dict]:
+        """Return all sessions for a user, newest first."""
+        with self._lock:
+            user_sessions = self.session_context.get(user_id, {})
+            result = []
+            for sid, s in user_sessions.items():
+                result.append({
+                    "session_id": sid,
+                    "title": s.get("title") or "新对话",
+                    "sandbox_id": s.get("sandbox_id", ""),
+                    "iteration_count": len(s.get("iterations", [])),
+                    "created_at": s.get("created_at", ""),
+                })
+            result.sort(key=lambda x: x["created_at"], reverse=True)
+            return result
+
+    def delete_session(self, user_id: str, session_id: str) -> bool:
+        with self._lock:
+            user_sessions = self.session_context.get(user_id, {})
+            if session_id in user_sessions:
+                del user_sessions[session_id]
+                return True
+            return False
+
+    def update_session_title(self, user_id: str, session_id: str, title: str) -> None:
+        with self._lock:
+            user_sessions = self.session_context.get(user_id, {})
+            if session_id in user_sessions:
+                user_sessions[session_id]["title"] = title
+
+    def get_session_knowledge(self, user_id: str, session_id: str) -> list[str]:
+        """Return patches/feedback from a session for skill knowledge extraction."""
+        with self._lock:
+            session = self.session_context.get(user_id, {}).get(session_id, {})
+            return list(session.get("patches", []))
+
     # ── Skills ────────────────────────────────────────────────────────
 
     def create_skill(self, data: dict) -> str:
@@ -206,6 +244,13 @@ class InMemoryStore:
         with self._lock:
             self.skills[skill_id] = data
         return skill_id
+
+    def delete_skill(self, skill_id: str) -> bool:
+        with self._lock:
+            if skill_id in self.skills:
+                del self.skills[skill_id]
+                return True
+            return False
 
     # ── External DB engines ───────────────────────────────────────────
 

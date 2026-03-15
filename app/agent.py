@@ -274,6 +274,7 @@ def _call_openai_protocol(system_prompt: str, user_prompt: str, model: str | Non
     payload = {
         "model": model or config.openai_model,
         "temperature": 0.2,
+        "max_tokens": 8192,
         "stream": True,
         "messages": [
             {"role": "system", "content": system_prompt},
@@ -367,7 +368,7 @@ def _parse_bundle_json(raw: str) -> dict:
         depth = 0
         in_str = False
         escape = False
-        end = start
+        end = -1
         for i, ch in enumerate(text[start:], start=start):
             if escape:
                 escape = False
@@ -387,11 +388,51 @@ def _parse_bundle_json(raw: str) -> dict:
                 if depth == 0:
                     end = i
                     break
-        candidate = text[start:end + 1]
-        try:
-            return json.loads(candidate)
-        except json.JSONDecodeError:
-            pass
+
+        if end != -1:
+            # Fully balanced JSON found
+            candidate = text[start:end + 1]
+            try:
+                return json.loads(candidate)
+            except json.JSONDecodeError:
+                pass
+        else:
+            # 3b. TRUNCATION REPAIR: JSON was cut off — try to salvage what we have
+            # Take everything from '{' to end of text and close open braces/brackets
+            partial = text[start:]
+            # Count how many levels deep we are so we can close them
+            repair_depth = 0
+            repair_in_str = False
+            repair_escape = False
+            for ch in partial:
+                if repair_escape:
+                    repair_escape = False
+                    continue
+                if ch == "\\" and repair_in_str:
+                    repair_escape = True
+                    continue
+                if ch == '"':
+                    repair_in_str = not repair_in_str
+                    continue
+                if repair_in_str:
+                    continue
+                if ch == "{":
+                    repair_depth += 1
+                elif ch == "}":
+                    repair_depth -= 1
+            # Close any open string, then add closing braces
+            if repair_in_str:
+                partial += '"'
+            partial += "}" * max(repair_depth, 1)
+            try:
+                return json.loads(partial)
+            except json.JSONDecodeError:
+                # Even partial salvage failed — just try parsing with null conclusions appended
+                try:
+                    salvage = partial.rsplit(",", 1)[0] + ", \"conclusions\": [{\"text\": \"(响应被截断，步骤已执行)\", \"confidence\": 0.5}]}" + "}" * max(repair_depth - 1, 0)
+                    return json.loads(salvage)
+                except Exception:
+                    pass
 
     # 4. Fallback for unescaped newlines inside strings
     # This specifically addresses the common issue where LLM outputs real \n inside "python_code"
@@ -435,3 +476,60 @@ def _parse_bundle_json(raw: str) -> dict:
         "explanation": "JSON 解析失败，已降级为错误提示。",
     }
 
+
+def generate_skill_proposal(
+    message: str,
+    analysis_result: dict,
+    sandbox_name: str,
+    provider: str | None = None,
+    model: str | None = None,
+) -> dict:
+    """Uses LLM to summarize a successful analysis into a skill proposal."""
+    config = load_config()
+    selected_provider = (provider or config.llm_provider).lower()
+
+    system_prompt = "你是一个业务知识提炼专家。请根据用户的提问、分析过程和结论，提取一个可复用的“分析技能”。"
+    user_prompt = f"""
+用户问题: {message}
+沙盒名称: {sandbox_name}
+分析结论: {json.dumps(analysis_result.get('conclusions', []), ensure_ascii=False)}
+分析步骤: {json.dumps(analysis_result.get('steps', []), ensure_ascii=False)}
+核心解释: {analysis_result.get('explanation', '')}
+
+请返回一个 JSON 对象，包含以下字段：
+1. "name": 技能名称（与整个对话内容高度相关，并且简洁）
+2. "description": 技能描述（要非常详细的描述）
+3. "tags": 关键词标签列表（3-5个）
+4. "knowledge": 提炼的核心业务知识（要非常详细的业务知识，包含业务规则、指标口径、字段说明等所有知识，要让一个普通人拿到这个技能描述能直接用起来例如：某某指标计算公式、业务判定逻辑、关键字段的业务含义。每条知识点要独立且精确，可以被后续对话直接参考）
+
+仅返回 JSON，不要任何解释文字。
+"""
+
+    full_content = ""
+    try:
+        if selected_provider == "openai":
+            chunks = _call_openai_protocol(system_prompt=system_prompt, user_prompt=user_prompt, model=model, config=config)
+        else:
+            chunks = _call_anthropic_protocol(system_prompt=system_prompt, user_prompt=user_prompt, model=model, config=config)
+        
+        for chunk in chunks:
+            full_content += chunk
+    except Exception:
+        pass
+
+    # Basic cleanup and parsing
+    parsed = _parse_bundle_json(full_content)
+    knowledge_val = parsed.get("knowledge", [])
+    if isinstance(knowledge_val, str):
+        knowledge_list = [k.strip() for k in knowledge_val.split("\n") if k.strip()]
+    elif isinstance(knowledge_val, list):
+        knowledge_list = [str(k) for k in knowledge_val]
+    else:
+        knowledge_list = []
+
+    return {
+        "name": str(parsed.get("name", "")).strip(),
+        "description": str(parsed.get("description", "")).strip(),
+        "tags": parsed.get("tags", []) if isinstance(parsed.get("tags"), list) else [],
+        "knowledge": knowledge_list,
+    }

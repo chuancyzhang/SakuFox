@@ -30,10 +30,34 @@ class FeedbackRequest(BaseModel):
 class SaveSkillRequest(BaseModel):
     proposal_id: str
     name: str
+    description: str | None = None
+    tags: list[str] | None = None
+    knowledge: list[str] | None = None  # extra business knowledge lines
+    table_descriptions: list[dict] | None = None  # [{"table": ..., "description": ...}]
+
+
+class UpdateSessionRequest(BaseModel):
+    title: str
+
+
+class ProposeSkillRequest(BaseModel):
+    proposal_id: str
+    message: str
+    sandbox_id: str
+
+
+class UpdateSkillRequest(BaseModel):
+    name: str | None = None
+    description: str | None = None
+    tags: list[str] | None = None
+    knowledge: list[str] | None = None
+    table_descriptions: list[dict] | None = None
+
 
 class CreateSandboxRequest(BaseModel):
     name: str
     allowed_groups: list[str]
+
 
 class RenameSandboxRequest(BaseModel):
     name: str

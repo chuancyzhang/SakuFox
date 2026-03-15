@@ -8,7 +8,7 @@ from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.agent import run_analysis_iteration, generate_data_insight
+from app.agent import run_analysis_iteration, generate_data_insight, generate_skill_proposal
 from app.auth import get_current_user, login_with_ldap, login_with_oauth
 from app.authorization import (
     assert_sandbox_access,
@@ -22,6 +22,9 @@ from app.models import (
     IterateRequest,
     LoginRequest,
     SaveSkillRequest,
+    UpdateSessionRequest,
+    ProposeSkillRequest,
+    UpdateSkillRequest,
     CreateSandboxRequest,
     RenameSandboxRequest,
 )
@@ -91,6 +94,13 @@ def iterate(req: IterateRequest, user: User = Depends(get_current_user)):
 
     config = load_config()
     session_id, session = store.get_or_create_session(user.user_id, req.session_id)
+
+    # Auto-title the session from the first message and track sandbox_id
+    if not session.get("title"):
+        title = req.message[:40].strip()
+        store.update_session_title(user.user_id, session_id, title)
+    if not session.get("sandbox_id"):
+        session["sandbox_id"] = req.sandbox_id
 
     selected_tables = _resolve_selected_tables(
         requested_tables=req.selected_tables,
@@ -242,6 +252,26 @@ def iteration_history(session_id: str, user: User = Depends(get_current_user)):
     return {"session_id": session_id, "iterations": history}
 
 
+@app.get("/api/chat/sessions")
+def list_sessions(user: User = Depends(get_current_user)):
+    """List all sessions for the current user."""
+    return {"sessions": store.list_sessions(user.user_id)}
+
+
+@app.delete("/api/chat/sessions/{session_id}")
+def delete_session(session_id: str, user: User = Depends(get_current_user)):
+    ok = store.delete_session(user.user_id, session_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return {"deleted": session_id}
+
+
+@app.patch("/api/chat/sessions/{session_id}")
+def update_session(session_id: str, req: UpdateSessionRequest, user: User = Depends(get_current_user)):
+    store.update_session_title(user.user_id, session_id, req.title)
+    return {"session_id": session_id, "title": req.title}
+
+
 # ── Insight analysis (kept) ───────────────────────────────────────────
 
 
@@ -340,12 +370,86 @@ async def upload_data(
 @app.post("/api/skills/save")
 def save_skill(req: SaveSkillRequest, user: User = Depends(get_current_user)):
     try:
-        skill = save_skill_from_proposal(user, req.proposal_id, req.name)
+        # Extract session_id from proposal if available (for knowledge extraction)
+        proposal = store.proposals.get(req.proposal_id, {})
+        session_id = proposal.get("session_id")
+        skill = save_skill_from_proposal(
+            user=user,
+            proposal_id=req.proposal_id,
+            name=req.name,
+            description=req.description,
+            tags=req.tags,
+            extra_knowledge=req.knowledge,
+            table_descriptions=req.table_descriptions,
+            session_id=session_id,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
     return {"skill": skill}
+
+
+@app.post("/api/skills/propose")
+def propose_skill(req: ProposeSkillRequest, user: User = Depends(get_current_user)):
+    proposal = store.proposals.get(req.proposal_id)
+    if not proposal:
+        raise HTTPException(status_code=404, detail="Proposal not found")
+    
+    sandbox = store.sandboxes.get(req.sandbox_id)
+    sandbox_name = sandbox.get("name", "未命名沙盒") if sandbox else "未知沙盒"
+    
+    # We use the final iteration's result as the source for summarization
+    # Assuming proposal object contains the analysis result data
+    suggestion = generate_skill_proposal(
+        message=req.message,
+        analysis_result=proposal, # proposal often is the dict representation of the final result
+        sandbox_name=sandbox_name
+    )
+    return suggestion
+
+
+@app.delete("/api/skills/{skill_id}")
+def delete_skill(skill_id: str, user: User = Depends(get_current_user)):
+    skill = store.skills.get(skill_id)
+    if not skill:
+        raise HTTPException(status_code=404, detail="Skill not found")
+    if skill["owner_id"] != user.user_id:
+        raise HTTPException(status_code=403, detail="无权删除他人技能")
+    store.delete_skill(skill_id)
+    return {"deleted": skill_id}
+
+
+@app.get("/api/skills/{skill_id}")
+def get_skill(skill_id: str, user: User = Depends(get_current_user)):
+    skill = store.skills.get(skill_id)
+    if not skill:
+        raise HTTPException(status_code=404, detail="Skill not found")
+    if skill["owner_id"] != user.user_id and not set(skill["groups"]).intersection(user.groups):
+        raise HTTPException(status_code=403, detail="无权查看该技能")
+    return {"skill_id": skill_id, **skill}
+
+
+
+@app.patch("/api/skills/{skill_id}")
+def update_skill(skill_id: str, req: UpdateSkillRequest, user: User = Depends(get_current_user)):
+    skill = store.skills.get(skill_id)
+    if not skill:
+        raise HTTPException(status_code=404, detail="Skill not found")
+    if skill["owner_id"] != user.user_id:
+        raise HTTPException(status_code=403, detail="无权修改他人技能")
+    with store._lock:
+        if req.name is not None:
+            skill["name"] = req.name
+        if req.description is not None:
+            skill["description"] = req.description
+        if req.tags is not None:
+            skill["tags"] = req.tags
+        if req.knowledge is not None:
+            skill.setdefault("layers", {})["knowledge"] = req.knowledge
+        if req.table_descriptions is not None:
+            skill.setdefault("layers", {})["tables"] = req.table_descriptions
+    return {"skill_id": skill_id, **skill}
 
 
 @app.get("/api/skills")
