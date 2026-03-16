@@ -91,3 +91,9 @@ Move beyond ephemeral sessions. Create, name, and manage dedicated Workspaces fo
 
 Contributions are welcome! Please submit a Pull Request or open an issue for feature requests.
 
+---
+
+## 📄 License
+
+This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
+
