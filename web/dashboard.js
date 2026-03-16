@@ -3,7 +3,7 @@ let lastProposalId = "";
 let sandboxesData = [];
 let uploadedFiles = [];
 let currentEditingSkillId = ""; // skill being edited, or "" for create mode
-
+let skillModal = null; // Global reference for the skill detail modal
 const userInfo = document.getElementById("userInfo");
 const tableList = document.getElementById("tableList");
 const sandboxSelect = document.getElementById("sandboxSelect");
@@ -225,9 +225,8 @@ async function refreshSkills() {
 
 function loadSkillIntoForm(skillId, skill) {
   currentEditingSkillId = skillId;
-  
-  const formFields = document.getElementById("skillFormFields");
-  if (formFields) formFields.style.display = "flex";
+
+  if (skillModal) skillModal.style.display = "flex";
 
   // Populate form
   document.getElementById("skillNameInput").value = skill.name || "";
@@ -254,8 +253,7 @@ function loadSkillIntoForm(skillId, skill) {
     btn.parentNode.insertBefore(cancelLink, btn.nextSibling);
   }
 
-  // Scroll right sidebar form into view
-  document.getElementById("skillNameInput").scrollIntoView({ behavior: "smooth", block: "center" });
+  // No need to scroll as it's a modal now
   document.getElementById("skillNameInput").focus();
 }
 
@@ -265,11 +263,7 @@ function cancelSkillEdit() {
   if (document.getElementById("skillDescInput")) document.getElementById("skillDescInput").value = "";
   if (document.getElementById("skillTagsInput")) document.getElementById("skillTagsInput").value = "";
   if (document.getElementById("skillKnowledgeInput")) document.getElementById("skillKnowledgeInput").value = "";
-  const btn = document.getElementById("saveSkillBtn");
-  btn.innerHTML = '<i class="fa-solid fa-bookmark"></i> 保存为技能';
-  btn.style.borderColor = "";
-  const cancelLink = document.getElementById("skillEditCancelLink");
-  if (cancelLink) cancelLink.remove();
+  if (skillModal) skillModal.style.display = "none";
 }
 
 async function refreshSessions() {
@@ -730,6 +724,8 @@ document.getElementById("saveSkillBtn").onclick = async () => {
       if (document.getElementById("skillDescInput")) document.getElementById("skillDescInput").value = "";
       if (document.getElementById("skillTagsInput")) document.getElementById("skillTagsInput").value = "";
       if (document.getElementById("skillKnowledgeInput")) document.getElementById("skillKnowledgeInput").value = "";
+
+      if (skillModal) skillModal.style.display = "none";
     }
     await refreshSkills();
   } catch (e) {
@@ -812,6 +808,23 @@ closeUploadModalBtn.onclick = () => {
   uploadModal.style.display = "none";
 };
 
+const closeSkillModalBtn = document.getElementById("closeSkillModalBtn");
+const skillEditCancelLink = document.getElementById("skillEditCancelLink");
+
+if (closeSkillModalBtn) {
+  closeSkillModalBtn.onclick = () => {
+    if (skillModal) skillModal.style.display = "none";
+    cancelSkillEdit();
+  };
+}
+if (skillEditCancelLink) {
+  skillEditCancelLink.onclick = (e) => {
+    e.preventDefault();
+    if (skillModal) skillModal.style.display = "none";
+    cancelSkillEdit();
+  };
+}
+
 // ── External DB Connection Modal Logic ──────────────────────────────────────
 
 const dbModal = document.getElementById("dbModal");
@@ -833,6 +846,10 @@ window.onclick = (event) => {
   }
   if (event.target === uploadModal) {
     uploadModal.style.display = "none";
+  }
+  if (event.target === skillModal) {
+    skillModal.style.display = "none";
+    cancelSkillEdit();
   }
 };
 
@@ -1056,7 +1073,6 @@ document.getElementById("btnDeleteSandbox").onclick = async () => {
   try {
     await api(`/api/sandboxes/${currentSandboxId}`, { method: "DELETE" });
     sandboxSelect.value = "";
-    await refreshProfile();
   } catch (e) {
     alert("删除失败: " + e.message);
   }
@@ -1111,10 +1127,15 @@ function setupSidebar(sidebarId, resizerId, toggleBtnId, direction) {
 setupSidebar("leftSidebar", "resizerLeft", "toggleLeftBtn", "left");
 setupSidebar("rightSidebar", "resizerRight", "toggleRightBtn", "right");
 
+// Initialize global modal reference
+skillModal = document.getElementById("skillModal");
+
 // ── Initial data load ──────────────────────────────────────────────────
 refreshSkills();
 refreshSessions();
+refreshProfile();
 
+// ── Event listeners for Skill Proposal ──────────────────────────────────
 document.getElementById("proposeSkillBtn").onclick = () => {
     // Get the last user message from the DOM
     const userBubbles = document.querySelectorAll(".user-bubble");
@@ -1128,30 +1149,38 @@ async function proposeSkillMetadata(proposalId, userMessage) {
     return;
   }
 
-  const formFields = document.getElementById("skillFormFields");
-  if (formFields) formFields.style.display = "flex";
+  const proposeBtn = document.getElementById("proposeSkillBtn");
+  const originalBtnContent = proposeBtn ? proposeBtn.innerHTML : "";
+  if (proposeBtn) {
+    proposeBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> 正在启动...';
+    proposeBtn.disabled = true;
+  }
 
   const nameInput = document.getElementById("skillNameInput");
   const descInput = document.getElementById("skillDescInput");
   const tagsInput = document.getElementById("skillTagsInput");
   const knowledgeInput = document.getElementById("skillKnowledgeInput");
 
-  // Clear previous values
-  if (nameInput) nameInput.value = "";
-  if (descInput) descInput.value = "";
-  if (tagsInput) tagsInput.value = "";
-  if (knowledgeInput) knowledgeInput.value = "";
-
-  // Show loading state
-  if (nameInput) nameInput.placeholder = "AI 正在思考技能名称...";
-  if (descInput) descInput.placeholder = "AI 正在提取功能描述...";
-  if (tagsInput) tagsInput.placeholder = "AI 正在生成标签...";
-  if (knowledgeInput) knowledgeInput.placeholder = "AI 正在提炼业务知识...";
+  // Create thinking card in chat
+  const wrapper = createAiMessageContainer();
+  let accumulatedThought = "正在启动技能提炼程序...\n";
+  updateAiCard(wrapper, "AI 技能提炼中", "<div>正在准备分析环境，请稍候...</div>", accumulatedThought);
 
   const sandboxId = sandboxSelect.value;
+  let distilledData = null;
 
   try {
-    const data = await api("/api/skills/propose", {
+    // Stage 1: Context Analysis
+    accumulatedThought += "> 步骤 1: 正在回顾会话上下文以确定核心业务逻辑...\n";
+    updateAiCard(wrapper, "AI 技能提炼中", "<div>正在回顾对话历史...</div>", accumulatedThought);
+    await new Promise(r => setTimeout(r, 800));
+
+    // Stage 2: Knowledge Extraction
+    accumulatedThought += "> 步骤 2: 正在提取业务指标定义与计算口径...\n";
+    updateAiCard(wrapper, "AI 技能提炼中", "<div>正在提取关键业务指标与口径...</div>", accumulatedThought);
+    
+    // Start the API call in parallel with the structure generation thinking step
+    const requestPromise = api("/api/skills/propose", {
       method: "POST",
       body: JSON.stringify({
         proposal_id: proposalId,
@@ -1160,19 +1189,63 @@ async function proposeSkillMetadata(proposalId, userMessage) {
       })
     });
 
-    if (data.name && nameInput) nameInput.value = data.name;
-    if (data.description && descInput) descInput.value = data.description;
-    if (data.tags && tagsInput) tagsInput.value = data.tags.join(", ");
-    if (data.knowledge && knowledgeInput) knowledgeInput.value = data.knowledge.join("\n");
+    // Stage 3: Structure Generation
+    accumulatedThought += "> 步骤 3: 正在构建标准化的技能沉淀结构...\n";
+    updateAiCard(wrapper, "AI 技能提炼中", "<div>正在构建技能沉淀结构...</div>", accumulatedThought);
+    
+    const [data] = await Promise.all([requestPromise, new Promise(r => setTimeout(r, 1200))]);
+    distilledData = data;
+
+    // Stage 4: Refinement
+    accumulatedThought += "> 步骤 4: 正在对提炼结果进行细节优化与合规校验...\n";
+    updateAiCard(wrapper, "AI 技能提炼中", "<div>正在优化提炼结果...</div>", accumulatedThought);
+    await new Promise(r => setTimeout(r, 500));
+
+    // Populate the hidden form fields for the modal
+    if (distilledData.name && nameInput) nameInput.value = distilledData.name;
+    if (distilledData.description && descInput) descInput.value = distilledData.description;
+    if (distilledData.tags && tagsInput) tagsInput.value = distilledData.tags.join(", ");
+    if (distilledData.knowledge && knowledgeInput) knowledgeInput.value = (distilledData.knowledge || []).join("\n");
+
+    // Clear skill id to ensure create mode
+    currentEditingSkillId = "";
+
+    // Final Success State in Chat
+    const successHtml = `
+      <div style="background: #f0fdf4; border-radius: 8px; padding: 16px; border: 1px solid #bbf7d0; margin-bottom: 12px;">
+        <div style="color: #166534; font-weight: 600; margin-bottom: 8px;"><i class="fa-solid fa-circle-check"></i> 技能提炼完毕！</div>
+        <div style="font-size: 13px; color: #15803d; line-height: 1.5; margin-bottom: 12px;">
+          AI 已基于当前对话成功提炼出业务技能建议。您可以点击下方按钮查看详情、编辑内容并最终保存。
+        </div>
+        <button id="reviewSkillBtn" class="btn btn-primary btn-block" style="padding: 10px;">
+          <i class="fa-solid fa-eye"></i> 点击查看提炼建议
+        </button>
+      </div>
+    `;
+    updateAiCard(wrapper, "提炼成功", successHtml, accumulatedThought);
+
+    // Bind the review button
+    const reviewBtn = document.getElementById("reviewSkillBtn");
+    if (reviewBtn) {
+      reviewBtn.onclick = () => {
+        if (skillModal) {
+            skillModal.style.display = "flex";
+        } else {
+            // Fallback if global init failed
+            const m = document.getElementById("skillModal");
+            if (m) m.style.display = "flex";
+        }
+      };
+    }
 
   } catch (e) {
     console.warn("Auto propose skill metadata failed", e);
-    alert("提炼失败: " + e.message);
+    updateAiCard(wrapper, "提炼失败", `<div style="color: #ef4444">${e.message}</div>`, accumulatedThought);
   } finally {
-    // Reset placeholders
-    if (nameInput) nameInput.placeholder = "技能名称 (必填)";
-    if (descInput) descInput.placeholder = "一句话描述这个技能能做什么...";
-    if (tagsInput) tagsInput.placeholder = "标签 (逗号分隔)";
-    if (knowledgeInput) knowledgeInput.placeholder = "业务规则、指标口径、字段说明...";
+    // Restore sidebar button state
+    if (proposeBtn) {
+      proposeBtn.innerHTML = originalBtnContent;
+      proposeBtn.disabled = false;
+    }
   }
 }
