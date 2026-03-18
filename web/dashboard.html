@@ -123,12 +123,14 @@
               <li class="empty-state">暂无沉淀技能</li>
             </ul>
           <div class="sidebar-section" style="border-top: 1px solid var(--border); padding-top: 10px;">
-            <div class="section-header" style="justify-content: space-between;">
+            <button id="btnNewSession" class="btn btn-outline btn-block" style="margin-bottom: 12px; border-style: dashed; border-color: var(--primary);">
+              <i class="fa-solid fa-plus"></i> 开启新对话
+            </button>
+            <div class="section-header" style="justify-content: space-between; border-bottom: none; padding-bottom: 4px;">
               <div style="display:flex;align-items:center;gap:6px;">
                 <i class="fa-solid fa-clock-rotate-left"></i>
                 <h2>历史对话</h2>
               </div>
-              <button id="btnNewSession" class="icon-btn" title="新建对话"><i class="fa-solid fa-plus"></i></button>
             </div>
             <ul id="sessionList" class="nav-list" style="max-height: 280px; overflow-y: auto;">
               <li class="empty-state">暂无历史对话</li>
