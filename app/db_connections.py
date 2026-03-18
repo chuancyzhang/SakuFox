@@ -103,3 +103,20 @@ def get_table_names(engine: "Engine") -> list[str]:
         raise RuntimeError("SQLAlchemy 未安装")
     inspector = inspect(engine)
     return inspector.get_table_names()
+
+
+def get_table_columns_info(engine: "Engine", table_name: str) -> list[dict]:
+    """Inspect the database and return column info for a table."""
+    if not _HAS_SQLALCHEMY:
+        raise RuntimeError("SQLAlchemy 未安装")
+    inspector = inspect(engine)
+    columns = inspector.get_columns(table_name)
+    return [{"name": c["name"], "type": str(c["type"])} for c in columns]
+
+
+def get_sample_data(engine: "Engine", table_name: str, limit: int = 3) -> list[dict]:
+    """Fetch sample rows from a table."""
+    if not _HAS_SQLALCHEMY:
+        raise RuntimeError("SQLAlchemy 未安装")
+    sql = f"SELECT * FROM {table_name} LIMIT {limit}"
+    return execute_external_sql(engine, sql)

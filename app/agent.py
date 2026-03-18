@@ -118,12 +118,30 @@ def _build_iteration_user_prompt(
                 parts.append(f"  提出猜想: {', '.join(h.get('text', str(h)) if isinstance(h, dict) else str(h) for h in hypotheses[:3])}...")
         parts.append("")
 
-    # Current context
-    parts.append(f"沙盒可用表: {sandbox.get('tables', [])}")
+    # Current context: Tables, Schema, and Samples (Ground Truth)
+    tables = sandbox.get("tables", [])
+    if tables:
+        parts.append("【沙盒可用表详述 - Ground Truth】")
+        from app.store import DatabaseStore
+        store = DatabaseStore()
+        context = store.get_sandbox_full_context(sandbox.get("sandbox_id"))
+        for tbl in tables:
+            info = context.get(tbl, {})
+            cols = info.get("columns", [])
+            sample = info.get("sample", [])
+            
+            col_desc = ", ".join(f"{c['name']} ({c['type']})" for c in cols)
+            parts.append(f"表名: {tbl}")
+            parts.append(f"字段: {col_desc or '无法获取'}")
+            if sample:
+                parts.append(f"样数据(前3行): {json.dumps(sample, ensure_ascii=False)}")
+            parts.append("")
+
     parts.append(f"沙盒勾选文件: {sandbox.get('selected_files', [])}")
     parts.append(f"沙盒元数据: {sandbox.get('metadata', {})}")
     parts.append(f"用户问题: {message}")
-    parts.append("请自主选择工具组合，完成分析并返回 JSON。")
+    parts.append("请合理编排 SQL 和 Python 步骤。SQL 结果会自动以 df0, df1... 注入 Python 变量，无需手动转换。")
+    parts.append("如果涉及多表对比，请分别写 SQL 获取数据，然后在 Python 中合并分析。")
 
     return "\n".join(parts)
 

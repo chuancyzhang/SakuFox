@@ -1,3 +1,4 @@
+import re
 from collections.abc import Callable
 
 from app.authorization import get_sensitive_fields
@@ -9,6 +10,7 @@ def execute_select_sql(
     allowed_tables: list[str],
     query_executor: Callable[[str], list[dict]],
 ) -> tuple[list[dict], list[str]]:
+    """Execute SQL and return rows. Normalization is now handled by the executor (e.g., pd.read_sql)."""
     enforce_select_only(sql)
     used_tables = enforce_table_whitelist(sql, allowed_tables)
     rows = query_executor(sql)

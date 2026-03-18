@@ -119,115 +119,124 @@ ALLOWED_BUILTINS = {
 
 def run_python_pipeline(
     python_code: str,
-    seed_rows: list[dict],
+    shared_namespace: dict,
     upload_rows: dict[str, list[dict]],
     upload_paths: dict[str, str],
     sql_tool: Callable[[str], list[dict]],
     step_results: list[dict] | None = None,
 ) -> dict:
-    seed_df = pd.DataFrame(seed_rows) if seed_rows else pd.DataFrame()
+    """
+    Execute Python code within a persistent shared namespace.
+    """
     uploads_df = {name: pd.DataFrame(rows) for name, rows in upload_rows.items()}
 
     def sdk_execute_select_sql(sql: str) -> list[dict]:
         return sql_tool(sql)
 
-    # Pre-inject all common libraries so AI code doesn't need to import them
-    local_vars: dict = {
-        # data
-        "df": seed_df,
-        "final_df": seed_df,
-        "uploaded_dataframes": uploads_df,
-        "uploaded_file_paths": upload_paths,
-        # multi-step results from prior steps
-        "step_results": step_results or [],
-        # output slots
-        "chart_specs": [],
-        "insight_hints": [],
-        # SQL tool
-        "execute_select_sql": sdk_execute_select_sql,
-        # ── data science libraries ──────────────────────────────────
-        "pd": pd,
-        "pandas": pd,
-        "np": _np,
-        "numpy": _np,
-        "json": _json,
-        "math": _math,
-        "re": _re,
-        # datetime helpers
-        "datetime": _datetime,
-        "date": _date,
-        "timedelta": _timedelta,
-        # collections helpers
-        "Counter": Counter,
-        "defaultdict": defaultdict,
-        # ── sklearn ─────────────────────────────────────────────────
-        # Linear models
-        "LinearRegression": LinearRegression,
-        "LogisticRegression": LogisticRegression,
-        "Ridge": Ridge,
-        "Lasso": Lasso,
-        # Ensemble
-        "RandomForestClassifier": RandomForestClassifier,
-        "RandomForestRegressor": RandomForestRegressor,
-        "GradientBoostingClassifier": GradientBoostingClassifier,
-        "GradientBoostingRegressor": GradientBoostingRegressor,
-        # Clustering
-        "KMeans": KMeans,
-        "DBSCAN": DBSCAN,
-        "AgglomerativeClustering": AgglomerativeClustering,
-        # Preprocessing
-        "StandardScaler": StandardScaler,
-        "MinMaxScaler": MinMaxScaler,
-        "LabelEncoder": LabelEncoder,
-        "OneHotEncoder": OneHotEncoder,
-        # Model selection
-        "train_test_split": train_test_split,
-        "cross_val_score": cross_val_score,
-        # Metrics
-        "accuracy_score": accuracy_score,
-        "f1_score": f1_score,
-        "precision_score": precision_score,
-        "recall_score": recall_score,
-        "mean_squared_error": mean_squared_error,
-        "mean_absolute_error": mean_absolute_error,
-        "r2_score": r2_score,
-        "classification_report": classification_report,
-        "confusion_matrix": confusion_matrix,
-        # Decomposition / Pipeline
-        "PCA": PCA,
-        "Pipeline": Pipeline,
-    }
+    # Initialize namespace if empty (first step)
+    if "pd" not in shared_namespace:
+        shared_namespace.update({
+            "pd": pd,
+            "pandas": pd,
+            "np": _np,
+            "numpy": _np,
+            "json": _json,
+            "math": _math,
+            "re": _re,
+            "datetime": _datetime,
+            "date": _date,
+            "timedelta": _timedelta,
+            "Counter": Counter,
+            "defaultdict": defaultdict,
+            "LinearRegression": LinearRegression,
+            "LogisticRegression": LogisticRegression,
+            "Ridge": Ridge,
+            "Lasso": Lasso,
+            "RandomForestClassifier": RandomForestClassifier,
+            "RandomForestRegressor": RandomForestRegressor,
+            "GradientBoostingClassifier": GradientBoostingClassifier,
+            "GradientBoostingRegressor": GradientBoostingRegressor,
+            "KMeans": KMeans,
+            "DBSCAN": DBSCAN,
+            "AgglomerativeClustering": AgglomerativeClustering,
+            "StandardScaler": StandardScaler,
+            "MinMaxScaler": MinMaxScaler,
+            "LabelEncoder": LabelEncoder,
+            "OneHotEncoder": OneHotEncoder,
+            "train_test_split": train_test_split,
+            "cross_val_score": cross_val_score,
+            "accuracy_score": accuracy_score,
+            "f1_score": f1_score,
+            "precision_score": precision_score,
+            "recall_score": recall_score,
+            "mean_squared_error": mean_squared_error,
+            "mean_absolute_error": mean_absolute_error,
+            "r2_score": r2_score,
+            "classification_report": classification_report,
+            "confusion_matrix": confusion_matrix,
+            "PCA": PCA,
+            "Pipeline": Pipeline,
+            "uploaded_dataframes": uploads_df,
+            "uploaded_file_paths": upload_paths,
+            "execute_select_sql": sdk_execute_select_sql,
+            "chart_specs": [],
+            "insight_hints": [],
+            "final_df": pd.DataFrame(),
+        })
 
-    global_vars = {"__builtins__": ALLOWED_BUILTINS}
+    # Ensure step_results is always available and fresh
+    shared_namespace["step_results"] = step_results or []
+    
+    # Ensure __builtins__ is available but safe
+    if "__builtins__" not in shared_namespace:
+        shared_namespace["__builtins__"] = ALLOWED_BUILTINS
 
     try:
-        exec(python_code, global_vars, local_vars)
-    except Exception as exc:
-        raise RuntimeError(f"Python 执行出错: {exc}") from exc
+        # EXECUTION: use the shared_namespace as BOTH globals and locals to allow persistence.
+        # In Python, when globals and locals are the same object, 
+        # variable assignments are correctly persisted in that object.
+        exec(python_code, shared_namespace)
+        
+        # Post-process: find the best result
+        final_df = shared_namespace.get("final_df")
+        if not isinstance(final_df, (pd.DataFrame, list)):
+            # If final_df not set or not a DF/list, try to use 'df'
+            if isinstance(shared_namespace.get("df"), pd.DataFrame):
+                final_df = shared_namespace["df"]
+            elif isinstance(shared_namespace.get("df"), list):
+                final_df = pd.DataFrame(shared_namespace["df"])
+            else:
+                final_df = pd.DataFrame() # Fallback
 
-    final_df = local_vars.get("final_df", local_vars.get("df", seed_df))
-    if not isinstance(final_df, pd.DataFrame):
-        # Try to coerce list-of-dicts output
         if isinstance(final_df, list):
             final_df = pd.DataFrame(final_df)
-        else:
-            raise ValueError("Python 脚本需要将处理结果赋值给 final_df（DataFrame 或 list[dict]）")
 
-    chart_specs = local_vars.get("chart_specs", [])
-    if not isinstance(chart_specs, list):
-        chart_specs = []
-    
-    # Auto-inject engine tag for frontend renderer
-    for spec in chart_specs:
-        if isinstance(spec, dict) and "engine" not in spec:
-            spec["engine"] = "echarts"
+        rows = final_df.to_dict(orient="records")
+        
+        # Consolidate charts and insights
+        chart_specs = shared_namespace.get("chart_specs", [])
+        if not isinstance(chart_specs, list): chart_specs = []
+        for spec in chart_specs:
+            if isinstance(spec, dict) and "engine" not in spec:
+                spec["engine"] = "echarts"
 
-    insight_hints = local_vars.get("insight_hints", [])
-    if not isinstance(insight_hints, list):
-        insight_hints = []
+        insight_hints = shared_namespace.get("insight_hints", [])
+        if not isinstance(insight_hints, list): insight_hints = []
 
-    return {
-        "rows": final_df.to_dict(orient="records"),
-        "chart_specs": chart_specs,
-        "insight_hints": [str(x) for x in insight_hints],
-    }
+        return {
+            "rows": rows,
+            "chart_specs": chart_specs,
+            "insight_hints": [str(x) for x in insight_hints],
+        }
+
+    except (KeyError, IndexError) as exc:
+        # Build helpful diagnostic message
+        available_vars = sorted([k for k, v in shared_namespace.items() if not k.startswith("__")])
+        df_cols = []
+        if isinstance(shared_namespace.get("df"), pd.DataFrame):
+            df_cols = list(shared_namespace["df"].columns)
+        
+        msg = f"访问出错: {str(exc)}\n可用变量: {available_vars}\n当前 df 字段: {df_cols}"
+        raise RuntimeError(msg) from exc
+    except Exception as exc:
+        raise RuntimeError(f"Python 执行出错: {str(exc)}") from exc

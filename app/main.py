@@ -577,37 +577,37 @@ def test_db_connection(
 
 # ── Internal helpers ──────────────────────────────────────────────────
 
+import pandas as pd
+from sqlalchemy import text
 
-def _query_rows(sql: str, sandbox_id: str | None = None) -> list[dict]:
-    """Execute SQL against external DB if configured, else built-in SQLite."""
+def _query_rows(sql: str, sandbox_id: str | None = None) -> pd.DataFrame:
+    """Execute SQL and return a DataFrame. Preserves aliases naturally."""
     if sandbox_id:
         engine = store.get_sandbox_engine(sandbox_id)
         if engine is not None:
-            return execute_external_sql(engine, sql)
-    cur = store.conn.cursor()
-    cur.execute(sql)
-    return [dict(r) for r in cur.fetchall()]
+            # External engine
+            return pd.read_sql(sql, engine)
+    
+    # Internal context
+    return pd.read_sql(sql, store.conn)
 
 
 def _auto_execute(result_data: dict, allowed_tables: list[str], upload_rows: dict[str, list[dict]], upload_paths: dict[str, str], sandbox_id: str | None = None) -> dict:
-    """Execute a multi-step pipeline from an iteration result.
-
-    The result_data contains a `steps` array. Each step is either:
-      {"tool": "sql", "code": "SELECT ..."}
-      {"tool": "python", "code": "..."}
-
-    Steps are executed sequentially. Results from prior steps are passed
-    to subsequent Python steps via the `step_results` list.
+    """
+    Seamless execution engine (notebook-like):
+    - Shared namespace across all steps.
+    - Fail-fast: stop on first error.
+    - Implicit dfN binding.
     """
     steps = result_data.get("steps", [])
     if not isinstance(steps, list):
         steps = []
 
+    shared_namespace: dict = {}
     step_results: list[dict] = []
     all_rows: list[dict] = []
     all_tables: list[str] = []
     all_chart_specs: list[dict] = []
-    last_sql_rows: list[dict] = []  # for df backward compat
 
     for i, step in enumerate(steps):
         tool = step.get("tool", "").lower()
@@ -618,32 +618,38 @@ def _auto_execute(result_data: dict, allowed_tables: list[str], upload_rows: dic
 
         if tool == "sql":
             try:
+                # Use a wrapper that returns DataFrame
+                def df_query_executor(s):
+                    return _query_rows(s, sandbox_id).to_dict(orient="records")
+
                 rows, used_tables = execute_select_sql_with_mask(
                     sql=code,
                     allowed_tables=allowed_tables,
-                    query_executor=lambda s: _query_rows(s, sandbox_id),
+                    query_executor=df_query_executor,
                 )
+                
                 step_results.append({"rows": rows, "tables": used_tables})
-                all_rows = rows  # last SQL result becomes the primary rows
-                last_sql_rows = rows
+                
+                # Bind to namespace as df{i} and df
+                step_df = pd.DataFrame(rows)
+                shared_namespace[f"df{i}"] = step_df
+                shared_namespace["df"] = step_df
+                
+                all_rows = rows
                 all_tables.extend(t for t in used_tables if t not in all_tables)
             except Exception as exc:
-                step_results.append({"rows": [{"error": f"SQL 执行失败 (step {i+1}): {str(exc)}"}], "tables": []})
-                all_rows = step_results[-1]["rows"]
+                error_msg = f"SQL 执行失败 (step {i+1}): {str(exc)}"
+                step_results.append({"rows": [{"error": error_msg}], "tables": []})
+                return {"step_results": step_results, "error": error_msg}
 
         elif tool == "python":
-            def sql_tool(s: str) -> list[dict]:
-                rows, _ = execute_select_sql_with_mask(
-                    sql=s,
-                    allowed_tables=allowed_tables,
-                    query_executor=lambda x: _query_rows(x, sandbox_id),
-                )
-                return rows
-
             try:
+                def sql_tool(s: str) -> list[dict]:
+                    return _query_rows(s, sandbox_id).to_dict(orient="records")
+
                 python_result = run_python_pipeline(
                     python_code=code,
-                    seed_rows=last_sql_rows,
+                    shared_namespace=shared_namespace,
                     upload_rows=upload_rows,
                     upload_paths=upload_paths,
                     sql_tool=sql_tool,
@@ -651,12 +657,14 @@ def _auto_execute(result_data: dict, allowed_tables: list[str], upload_rows: dic
                 )
                 result_rows = python_result["rows"]
                 result_charts = python_result.get("chart_specs", [])
+                
                 step_results.append({"rows": result_rows, "tables": all_tables, "chart_specs": result_charts})
                 all_rows = result_rows
                 all_chart_specs.extend(result_charts)
             except Exception as exc:
-                step_results.append({"rows": [{"error": f"Python 执行失败 (step {i+1}): {str(exc)}"}], "tables": all_tables})
-                all_rows = step_results[-1]["rows"]
+                error_msg = f"Python 执行失败 (step {i+1}): {str(exc)}"
+                step_results.append({"rows": [{"error": error_msg}], "tables": all_tables})
+                return {"step_results": step_results, "error": error_msg}
         else:
             step_results.append({"rows": [], "tables": [], "error": f"未知工具: {tool}"})
 

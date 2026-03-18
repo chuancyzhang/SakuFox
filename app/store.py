@@ -49,12 +49,14 @@ class DatabaseStore:
 
         # Keep the internal SQLite connection for the "sandbox demo" data
         self.db_engines: dict[str, object] = {}  # sandbox_id -> SQLAlchemy Engine
+        
         self.conn = sqlite3.connect(":memory:", check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         
         # Initialize database tables
         Base.metadata.create_all(self.engine)
         self._seed_sandbox_data()
+        self._init_default_sandbox()
 
     def _seed_sandbox_data(self) -> None:
         """Seed the demo table in-memory."""
@@ -108,14 +110,20 @@ class DatabaseStore:
             )
             self.conn.commit()
 
-        # Seed default sandbox if not exists
+    def _init_default_sandbox(self) -> None:
+        """Ensure the default sandbox entry exists in the metadata DB and has the right tables."""
+        demo_db_path = Path(__file__).resolve().parent.parent / "superset_demo.db"
+        using_prebuilt = demo_db_path.exists()
+        
         with self.SessionFactory() as sess:
             sb = sess.execute(select(DBSandbox).where(DBSandbox.sandbox_id == "sb_flights_overview")).scalar_one_or_none()
+            tables = ["tutorial_flights", "video_game_sales"] if using_prebuilt else ["tutorial_flights"]
+            
             if not sb:
                 new_sb = DBSandbox(
                     sandbox_id="sb_flights_overview",
-                    name="Superset 航班样例沙盒",
-                    tables=["tutorial_flights"],
+                    name="Superset 样例沙盒",
+                    tables=tables,
                     allowed_groups=["finance", "marketing", "data", "admin"],
                     business_knowledge=[],
                     uploads={},
@@ -123,6 +131,18 @@ class DatabaseStore:
                 )
                 sess.add(new_sb)
                 sess.commit()
+            elif set(sb.tables) != set(tables):
+                sb.tables = tables
+                sess.commit()
+
+        # If using pre-built DB, register it as the engine for this sandbox
+        if using_prebuilt:
+            engine = create_engine(f"sqlite:///{demo_db_path}", pool_pre_ping=True)
+            db_config = {
+                "db_type": "sqlite",
+                "database": str(demo_db_path)
+            }
+            self.register_sandbox_db("sb_flights_overview", engine, db_config)
 
     # ── Token / Auth ──────────────────────────────────────────────────
 
@@ -322,6 +342,9 @@ class DatabaseStore:
                     "message": p.message,
                     "result_rows": p.result_rows,
                     "chart_specs": p.chart_specs,
+                    "tables": p.tables or [],
+                    "steps": p.steps or [],
+                    "explanation": p.explanation or "",
                     "sql": "", # Compatibility
                     "status": p.status
                 }
@@ -424,6 +447,48 @@ class DatabaseStore:
     def get_sandbox_engine(self, sandbox_id: str) -> object | None:
         return self.db_engines.get(sandbox_id)
 
+    def get_sandbox_full_context(self, sandbox_id: str) -> dict[str, dict]:
+        """Get schema and samples for all tables in a sandbox."""
+        with self.SessionFactory() as sess:
+            sb = sess.get(DBSandbox, sandbox_id)
+            if not sb:
+                return {}
+            
+            tables = sb.tables or []
+            context = {}
+            
+            # Check for external engine
+            engine = self.get_sandbox_engine(sandbox_id)
+            
+            for table in tables:
+                if engine:
+                    from app.db_connections import get_table_columns_info, get_sample_data
+                    try:
+                        columns = get_table_columns_info(engine, table)
+                        sample = get_sample_data(engine, table)
+                        context[table] = {"columns": columns, "sample": sample}
+                    except Exception:
+                        context[table] = {"columns": [], "sample": [], "error": "无法获取元数据"}
+                else:
+                    # Fallback to internal SQLite
+                    try:
+                        columns = self._get_sqlite_table_columns(table)
+                        sample = self._get_sqlite_table_sample(table)
+                        context[table] = {"columns": columns, "sample": sample}
+                    except Exception:
+                        context[table] = {"columns": [], "sample": [], "error": "无法获取元数据"}
+            return context
+
+    def _get_sqlite_table_columns(self, table_name: str) -> list[dict]:
+        cur = self.conn.cursor()
+        cur.execute(f"PRAGMA table_info({table_name})")
+        return [{"name": r["name"], "type": r["type"]} for r in cur.fetchall()]
+
+    def _get_sqlite_table_sample(self, table_name: str, limit: int = 3) -> list[dict]:
+        cur = self.conn.cursor()
+        cur.execute(f"SELECT * FROM {table_name} LIMIT {limit}")
+        return [dict(r) for r in cur.fetchall()]
+
     # ── Sandbox CRUD ───────────────────────────────────────────
     
     def create_sandbox(self, name: str, allowed_groups: list[str]) -> str:
@@ -490,7 +555,9 @@ class DatabaseStore:
         """Interface for compatibility with dict-based access."""
         outer = self
         class SandboxProxy:
-            def get(self, sid): return outer.get_sandbox(sid)
+            def get(self, sid, default=None):
+                res = outer.get_sandbox(sid)
+                return res if res is not None else default
             def __contains__(self, sid): return outer.get_sandbox(sid) is not None
             def items(self):
                 sbs = outer.list_sandboxes()
@@ -506,9 +573,10 @@ class DatabaseStore:
         """Interface for compatibility with dict-based access."""
         outer = self
         class SkillProxy:
-            def get(self, skid):
+            def get(self, skid, default=None):
                 with outer.SessionFactory() as sess:
                     sk = sess.get(DBSkill, skid)
+                    if not sk: return default
                     return {
                         "skill_id": sk.skill_id,
                         "owner_id": sk.owner_id,
@@ -533,7 +601,9 @@ class DatabaseStore:
         """Interface for compatibility with dict-based access."""
         outer = self
         class ProposalProxy:
-            def get(self, pid): return outer.get_proposal(pid)
+            def get(self, pid, default=None):
+                res = outer.get_proposal(pid)
+                return res if res is not None else default
             def __getitem__(self, pid):
                 res = outer.get_proposal(pid)
                 if not res: raise KeyError(pid)
