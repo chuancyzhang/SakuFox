@@ -207,17 +207,34 @@ async function refreshSkills() {
   } else {
     skills.skills.forEach((s) => {
       const li = document.createElement("li");
-      li.style.cursor = "pointer";
+      li.className = "skill-item";
       li.title = "点击查看/修改技能";
-      const tagsHtml = (s.tags || []).map(t => `<span style="background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:1px 6px;font-size:11px;">${escapeHtml(t)}</span>`).join(" ");
-      const tableStr = (s.inherited_tables || []).join(", ");
       li.innerHTML = `
-        <div style="font-weight:500;display:flex;justify-content:space-between;align-items:center;">
-          <span>${escapeHtml(s.name)}</span>
-          <i class="fa-solid fa-pen-to-square" style="font-size:11px;color:var(--text-muted);"></i>
+        <div class="skill-item-header">
+          <span class="skill-item-title">${escapeHtml(s.name)}</span>
+          <div class="delete-btn-round delete-icon" title="删除技能">
+            <i class="fa-solid fa-xmark"></i>
+          </div>
+        </div>
+        <div class="skill-item-meta">
+          <span><i class="fa-solid fa-tag"></i> ${(s.tags || []).slice(0, 2).join(", ") || "无标签"}</span>
+          <i class="fa-solid fa-pen-to-square" style="font-size: 11px; opacity: 0.6;"></i>
         </div>
       `;
       li.onclick = () => loadSkillIntoForm(s.skill_id, s);
+      
+      const deleteBtn = li.querySelector(".delete-icon");
+      deleteBtn.onclick = async (e) => {
+        e.stopPropagation();
+        if (!confirm(`确定要删除技能 "${s.name}" 吗？`)) return;
+        try {
+          await api(`/api/skills/${s.skill_id}`, { method: "DELETE" });
+          await refreshSkills();
+        } catch (err) {
+          alert("删除失败: " + err.message);
+        }
+      };
+      
       skillList.appendChild(li);
     });
   }
@@ -277,20 +294,40 @@ async function refreshSessions() {
     }
     res.sessions.forEach(sess => {
       const li = document.createElement("li");
-      li.style.cssText = "cursor:pointer;padding:8px 10px;border-radius:6px;position:relative;";
       if (sess.session_id === sessionId) {
-        li.style.background = "var(--bg-hover, #f0f4ff)";
-        li.style.fontWeight = "600";
+        li.className = "active";
       }
       const date = sess.created_at ? new Date(sess.created_at).toLocaleDateString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }) : "";
       li.innerHTML = `
-        <div style="font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(sess.title || '新对话')}</div>
-        <div style="font-size:11px;color:var(--text-muted);display:flex;justify-content:space-between;margin-top:2px;">
+        <div class="session-item-header">
+          <span class="session-item-title">${escapeHtml(sess.title || '新对话')}</span>
+          <div class="delete-btn-round delete-session-btn" title="删除对话">
+            <i class="fa-solid fa-xmark"></i>
+          </div>
+        </div>
+        <div class="session-item-meta">
           <span><i class="fa-solid fa-comments"></i> ${sess.iteration_count}轮</span>
           <span>${date}</span>
         </div>
       `;
       li.onclick = () => switchSession(sess.session_id);
+
+      const delBtn = li.querySelector(".delete-session-btn");
+      delBtn.onclick = async (e) => {
+        e.stopPropagation();
+        if (!confirm("确定要删除这段对话历史吗？")) return;
+        try {
+          await api(`/api/chat/sessions/${sess.session_id}`, { method: "DELETE" });
+          if (sessionId === sess.session_id) {
+            startNewSession();
+          } else {
+            refreshSessions();
+          }
+        } catch (err) {
+          alert("删除失败: " + err.message);
+        }
+      };
+
       sessionList.appendChild(li);
     });
   } catch (e) {
