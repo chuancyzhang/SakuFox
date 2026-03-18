@@ -119,29 +119,64 @@ def _build_iteration_user_prompt(
         parts.append("")
 
     # Current context: Tables, Schema, and Samples (Ground Truth)
-    tables = sandbox.get("tables", [])
-    if tables:
-        parts.append("【沙盒可用表详述 - Ground Truth】")
+    sandbox_id = sandbox.get("sandbox_id")
+    selected_files = sandbox.get('selected_files', [])
+    upload_paths = sandbox.get('upload_paths', {})
+
+    if sandbox_id:
         from app.store import DatabaseStore
         store = DatabaseStore()
-        context = store.get_sandbox_full_context(sandbox.get("sandbox_id"))
-        for tbl in tables:
-            info = context.get(tbl, {})
-            cols = info.get("columns", [])
-            sample = info.get("sample", [])
-            
-            col_desc = ", ".join(f"{c['name']} ({c['type']})" for c in cols)
-            parts.append(f"表名: {tbl}")
-            parts.append(f"字段: {col_desc or '无法获取'}")
-            if sample:
-                parts.append(f"样数据(前3行): {json.dumps(sample, ensure_ascii=False)}")
-            parts.append("")
+        context = store.get_sandbox_full_context(sandbox_id)
+        
+        # 1. Database Tables
+        tables = sandbox.get("tables", [])
+        if tables:
+            parts.append("【沙盒可用表详述 - Ground Truth】")
+            for tbl in tables:
+                info = context.get(tbl, {})
+                cols = info.get("columns", [])
+                sample = info.get("sample", [])
+                col_desc = ", ".join(f"{c['name']} ({c['type']})" for c in cols)
+                parts.append(f"表名: {tbl}")
+                parts.append(f"字段: {col_desc or '无法获取'}")
+                if sample:
+                    parts.append(f"样数据(前3行): {json.dumps(sample, ensure_ascii=False)}")
+                parts.append("")
 
-    parts.append(f"沙盒勾选文件: {sandbox.get('selected_files', [])}")
-    parts.append(f"沙盒元数据: {sandbox.get('metadata', {})}")
+        # 2. Selected Uploaded Files
+        if selected_files:
+            parts.append("【已加载的本地文件详述 - Ground Truth】")
+            for fname in selected_files:
+                info = context.get(fname, {})
+                cols = info.get("columns", [])
+                sample = info.get("sample", [])
+                path = upload_paths.get(fname, "未知路径")
+                
+                col_desc = ", ".join(f"{c['name']} ({c['type']})" for c in cols)
+                parts.append(f"文件名: {fname}")
+                parts.append(f"实际物理路径: {path}")
+                if cols:
+                    parts.append(f"字段: {col_desc}")
+                
+                text_preview = info.get("text_preview")
+                if text_preview:
+                    parts.append(f"文件内容摘要/预览: \n{text_preview}")
+                
+                if sample:
+                    parts.append(f"样数据(前3行): {json.dumps(sample, ensure_ascii=False)}")
+                parts.append("")
+
     parts.append(f"用户问题: {message}")
-    parts.append("请合理编排 SQL 和 Python 步骤。SQL 结果会自动以 df0, df1... 注入 Python 变量，无需手动转换。")
-    parts.append("如果涉及多表对比，请分别写 SQL 获取数据，然后在 Python 中合并分析。")
+    parts.append("【指令约束】")
+    parts.append("- 请合理编排 SQL 和 Python 步骤。")
+    parts.append("- SQL 结果会自动以 df0, df1... 注入 Python 变量，无需手动转换。")
+    parts.append("- 如果涉及多表对比，请分别写 SQL 获取数据，然后在 Python 中合并分析。")
+    parts.append("- **处理本地文件**：如果需要处理上传的文件，请直接在 Python 步骤中加载。")
+    parts.append("  - 表格文件 (Excel/CSV): 使用 `pd.read_excel(uploaded_file_paths['文件名'])` 或 `pd.read_csv(...)`。")
+    parts.append("  - 文本/知识文件 (TXT/JSON/MD): 使用 `Path(uploaded_file_paths['文件名']).read_text(encoding='utf-8')` 或标准 `open()`。")
+    parts.append("- 系统已预先注入了 `uploaded_file_paths` (物理路径字典) 和 `uploaded_dataframes` (已预加载的表格字典)。")
+
+    return "\n".join(parts)
 
     return "\n".join(parts)
 

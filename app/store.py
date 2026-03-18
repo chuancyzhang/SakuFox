@@ -3,6 +3,7 @@ import sqlite3
 import threading
 import uuid
 import json
+import math
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -477,7 +478,49 @@ class DatabaseStore:
                         context[table] = {"columns": columns, "sample": sample}
                     except Exception:
                         context[table] = {"columns": [], "sample": [], "error": "无法获取元数据"}
+            
+            # Include uploaded files context
+            uploads = sb.uploads or {}
+            upload_paths = sb.upload_paths or {}
+            for name, rows in uploads.items():
+                if name in context: continue # Don't overwrite tables
+                
+                info: dict[str, Any] = {"is_upload": True}
+                if rows and len(rows) > 0:
+                    first_row = rows[0]
+                    info["columns"] = [{"name": str(k), "type": type(v).__name__} for k, v in first_row.items()]
+                    info["sample"] = rows[:3]
+                else:
+                    # Non-tabular or empty - try to get a text preview
+                    path = upload_paths.get(name)
+                    if path and Path(path).exists():
+                        try:
+                            # Try to read as text first
+                            with open(path, "r", encoding="utf-8") as f:
+                                preview = f.read(1000)
+                                info["text_preview"] = preview
+                                if len(preview) >= 1000:
+                                    info["text_preview"] += "..."
+                        except Exception:
+                            # Might be binary or other encoding
+                            info["text_preview"] = "无法预览内容（可能为二进制文件）"
+                    else:
+                        info["text_preview"] = "文件路径不存在或无法访问"
+                
+                context[name] = info
+                
             return context
+
+    def _sanitize_json(self, o: Any) -> Any:
+        """Replace NaN, Infinity with None for JSON compliance."""
+        if isinstance(o, dict):
+            return {k: self._sanitize_json(v) for k, v in o.items()}
+        if isinstance(o, list):
+            return [self._sanitize_json(v) for v in o]
+        if isinstance(o, float):
+            if math.isnan(o) or math.isinf(o):
+                return None
+        return o
 
     def _get_sqlite_table_columns(self, table_name: str) -> list[dict]:
         cur = self.conn.cursor()
@@ -511,7 +554,7 @@ class DatabaseStore:
         with self.SessionFactory() as sess:
             sb = sess.get(DBSandbox, sandbox_id)
             if sb:
-                return {
+                return self._sanitize_json({
                     "sandbox_id": sb.sandbox_id,
                     "name": sb.name,
                     "tables": sb.tables or [],
@@ -520,7 +563,7 @@ class DatabaseStore:
                     "uploads": sb.uploads or {},
                     "upload_paths": sb.upload_paths or {},
                     "db_connection": sb.db_config
-                }
+                })
             return None
 
     def update_sandbox(self, sandbox_id: str, updates: dict) -> dict:

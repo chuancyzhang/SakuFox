@@ -354,7 +354,9 @@ async def upload_data(
         
         # Determine if it's text or JSON or whatever, fallback to treating as document
         if is_tabular and 'df' in locals() and not df.empty:
-            rows = df.head(5000).to_dict(orient="records")
+            # Replace NaN/inf with None for JSON compatibility
+            clean_df = df.head(5000).where(pd.notnull(df.head(5000)), None)
+            rows = clean_df.to_dict(orient="records")
             columns = [str(c) for c in df.columns]
 
         store.add_upload(sandbox_id, filename, rows, file_path=file_path)
