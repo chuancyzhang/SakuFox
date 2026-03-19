@@ -6,7 +6,7 @@ SakuFox 是一个基于 Agentic 自主智能体与人机协同 (HITL) 的交互�
 
 ![intro](images/preview.png)
 ![intro](images/usage.png)
-![intro](images/SakuFox video.mp4)
+![SakuFox Video](images/SakuFox_video.mp4)
 
 
 ---
