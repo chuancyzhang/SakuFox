@@ -6,7 +6,7 @@ SakuFox is an interactive data analysis platform based on Agentic autonomous age
 
 ![intro](images/preview.png)
 ![intro](images/usage.png)
-![SakuFox Video](images/SakuFox_video.mp4)
+![SakuFox Video](https://github.com/user-attachments/assets/c53474f6-ad59-47b2-8a3b-dc0ba723a3ce)
 
 ---
 
