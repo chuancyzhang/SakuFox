@@ -14,6 +14,7 @@ from sqlalchemy.orm import sessionmaker, Session as SQLASession
 
 from app.config import load_config
 from app.db_models import Base, DBUser, DBSandbox, DBSession, DBIteration, DBSkill, DBProposal
+from app.i18n import t
 
 @dataclass
 class User:
@@ -123,7 +124,7 @@ class DatabaseStore:
             if not sb:
                 new_sb = DBSandbox(
                     sandbox_id="sb_flights_overview",
-                    name="Superset 样例沙盒",
+                    name=t("default_sandbox_name", default="Superset 样例沙盒"),
                     tables=tables,
                     allowed_groups=["finance", "marketing", "data", "admin"],
                     business_knowledge=[],
@@ -373,7 +374,7 @@ class DatabaseStore:
                 count = sess.query(DBIteration).filter(DBIteration.session_id == s.session_id).count()
                 result.append({
                     "session_id": s.session_id,
-                    "title": s.title or "新对话",
+                    "title": s.title or t("new_session_title", default="新对话"),
                     "sandbox_id": s.sandbox_id,
                     "iteration_count": count,
                     "created_at": s.created_at,
@@ -479,7 +480,7 @@ class DatabaseStore:
                         sample = get_sample_data(engine, table)
                         context[table] = {"columns": columns, "sample": sample}
                     except Exception:
-                        context[table] = {"columns": [], "sample": [], "error": "无法获取元数据"}
+                        context[table] = {"columns": [], "sample": [], "error": t("error_metadata", default="无法获取元数据")}
                 else:
                     # Fallback to internal SQLite
                     try:
@@ -513,9 +514,9 @@ class DatabaseStore:
                                     info["text_preview"] += "..."
                         except Exception:
                             # Might be binary or other encoding
-                            info["text_preview"] = "无法预览内容（可能为二进制文件）"
+                            info["text_preview"] = t("error_binary_file", default="无法预览内容（可能为二进制文件）")
                     else:
-                        info["text_preview"] = "文件路径不存在或无法访问"
+                        info["text_preview"] = t("error_file_access", default="文件路径不存在或无法访问")
                 
                 context[name] = info
                 

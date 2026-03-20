@@ -7,6 +7,9 @@ import pandas as pd
 from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from fastapi import Request
+
+from app.i18n import set_lang, t
 
 from app.agent import run_analysis_iteration, generate_data_insight, generate_skill_proposal
 from app.auth import get_current_user, login_with_ldap, login_with_oauth
@@ -33,9 +36,17 @@ from app.skills import list_skills, save_skill_from_proposal
 from app.tools import execute_select_sql_with_mask
 from app.store import User, store
 
-app = FastAPI(title="SakuFox 🦊 - 敏捷智能数据分析平台")
+app = FastAPI(title=t("app_title", default="SakuFox 🦊 - 敏捷智能数据分析平台"))
 web_dir = Path(__file__).resolve().parent.parent / "web"
 app.mount("/web", StaticFiles(directory=str(web_dir)), name="web")
+
+
+@app.middleware("http")
+async def i18n_middleware(request: Request, call_next):
+    lang = request.headers.get("X-Language", "zh")
+    set_lang(lang)
+    response = await call_next(request)
+    return response
 
 
 @app.get("/")
@@ -126,7 +137,8 @@ def iterate(req: IterateRequest, user: User = Depends(get_current_user)):
         for it in reversed(history):
             for h in it.get("hypotheses", []):
                 if isinstance(h, dict) and h.get("id") == req.hypothesis_id:
-                    message = f"[基于上轮猜想: {h['text']}] {message}"
+                    prefix = t("msg_based_on_hypothesis", default="基于上轮猜想")
+                    message = f"[{prefix}: {h['text']}] {message}"
                     break
 
     iteration_history = store.get_iteration_history(user.user_id, session_id)
@@ -229,7 +241,8 @@ def iterate(req: IterateRequest, user: User = Depends(get_current_user)):
         except RuntimeError as exc:
             yield json.dumps({"type": "error", "message": str(exc)}, ensure_ascii=False) + "\n"
         except Exception as exc:
-            yield json.dumps({"type": "error", "message": f"服务器内部错误: {str(exc)}"}, ensure_ascii=False) + "\n"
+            internal_error = t("error_internal", default="服务器内部错误")
+            yield json.dumps({"type": "error", "message": f"{internal_error}: {str(exc)}"}, ensure_ascii=False) + "\n"
 
     return StreamingResponse(stream_generator(), media_type="application/x-ndjson")
 
@@ -243,14 +256,14 @@ def feedback(req: FeedbackRequest, user: User = Depends(get_current_user)):
         return {
             "session_id": req.session_id,
             "type": "business_knowledge",
-            "message": "业务知识已沉淀，后续分析将自动参考。",
+            "message": t("msg_knowledge_saved", default="业务知识已沉淀，后续分析将自动参考。"),
         }
     else:
         store.append_patch(user.user_id, req.session_id, req.feedback)
         return {
             "session_id": req.session_id,
             "type": "feedback",
-            "message": "反馈已记录，下次迭代将参考。",
+            "message": t("msg_feedback_saved", default="反馈已记录，下次迭代将参考。"),
         }
 
 
@@ -272,7 +285,7 @@ def list_sessions(user: User = Depends(get_current_user)):
 def delete_session(session_id: str, user: User = Depends(get_current_user)):
     ok = store.delete_session(user.user_id, session_id)
     if not ok:
-        raise HTTPException(status_code=404, detail="Session not found")
+        raise HTTPException(status_code=404, detail=t("error_session_not_found"))
     return {"deleted": session_id}
 
 
@@ -289,9 +302,9 @@ def update_session(session_id: str, req: UpdateSessionRequest, user: User = Depe
 def analyze(proposal_id: str, user: User = Depends(get_current_user)):
     proposal = store.proposals.get(proposal_id)
     if not proposal:
-        raise HTTPException(status_code=404, detail="提案不存在")
+        raise HTTPException(status_code=404, detail=t("error_proposal_not_found"))
     if proposal["user_id"] != user.user_id:
-        raise HTTPException(status_code=403, detail="无权分析该提案")
+        raise HTTPException(status_code=403, detail=t("error_no_permission_proposal"))
 
     result = proposal.get("result_rows", [])
     config = load_config()
@@ -409,7 +422,9 @@ def propose_skill(req: ProposeSkillRequest, user: User = Depends(get_current_use
         raise HTTPException(status_code=404, detail="Proposal not found")
     
     sandbox = store.sandboxes.get(req.sandbox_id)
-    sandbox_name = sandbox.get("name", "未命名沙盒") if sandbox else "未知沙盒"
+    unnamed = t("msg_sandbox_unnamed", default="未命名沙盒")
+    unknown = t("msg_sandbox_unknown", default="未知沙盒")
+    sandbox_name = sandbox.get("name", unnamed) if sandbox else unknown
     
     # We use the final iteration's result as the source for summarization
     # Assuming proposal object contains the analysis result data
@@ -425,9 +440,9 @@ def propose_skill(req: ProposeSkillRequest, user: User = Depends(get_current_use
 def delete_skill(skill_id: str, user: User = Depends(get_current_user)):
     skill = store.skills.get(skill_id)
     if not skill:
-        raise HTTPException(status_code=404, detail="Skill not found")
+        raise HTTPException(status_code=404, detail=t("error_skill_not_found"))
     if skill["owner_id"] != user.user_id:
-        raise HTTPException(status_code=403, detail="无权删除他人技能")
+        raise HTTPException(status_code=403, detail=t("error_no_permission_skill"))
     store.delete_skill(skill_id)
     return {"deleted": skill_id}
 
@@ -436,9 +451,9 @@ def delete_skill(skill_id: str, user: User = Depends(get_current_user)):
 def get_skill(skill_id: str, user: User = Depends(get_current_user)):
     skill = store.skills.get(skill_id)
     if not skill:
-        raise HTTPException(status_code=404, detail="Skill not found")
+        raise HTTPException(status_code=404, detail=t("error_skill_not_found"))
     if skill["owner_id"] != user.user_id and not set(skill["groups"]).intersection(user.groups):
-        raise HTTPException(status_code=403, detail="无权查看该技能")
+        raise HTTPException(status_code=403, detail=t("error_no_permission_skill"))
     return {"skill_id": skill_id, **skill}
 
 
@@ -447,9 +462,9 @@ def get_skill(skill_id: str, user: User = Depends(get_current_user)):
 def update_skill(skill_id: str, req: UpdateSkillRequest, user: User = Depends(get_current_user)):
     skill = store.skills.get(skill_id)
     if not skill:
-        raise HTTPException(status_code=404, detail="Skill not found")
+        raise HTTPException(status_code=404, detail=t("error_skill_not_found"))
     if skill["owner_id"] != user.user_id:
-        raise HTTPException(status_code=403, detail="无权修改他人技能")
+        raise HTTPException(status_code=403, detail=t("error_no_permission_skill"))
     with store._lock:
         if req.name is not None:
             skill["name"] = req.name
@@ -513,7 +528,7 @@ def register_db_connection(
         )
         engine = get_engine(cfg)
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"连接配置错误: {str(exc)}")
+        raise HTTPException(status_code=400, detail=f"{t('error_db_config', default='连接配置错误')}: {str(exc)}")
 
     db_config = {
         "db_type": req.db_type,
@@ -530,7 +545,7 @@ def register_db_connection(
         pass # If we fail to get tables for some reason, just return empty list
 
     store.register_sandbox_db(sandbox_id, engine, db_config)
-    return {"sandbox_id": sandbox_id, "db_config": db_config, "tables": table_names, "message": "数据库连接已注册，下次迭代将自动使用外部数据库"}
+    return {"sandbox_id": sandbox_id, "db_config": db_config, "tables": table_names, "message": t("msg_db_registered", default="数据库连接已注册，下次迭代将自动使用外部数据库")}
 
 
 @app.post("/api/sandboxes/{sandbox_id}/db-tables")
@@ -546,7 +561,8 @@ def save_sandbox_tables(
         raise HTTPException(status_code=403, detail=str(exc))
 
     if len(req.tables) > MAX_SELECTED_TABLES:
-        raise HTTPException(status_code=400, detail=f"最多只能选择 {MAX_SELECTED_TABLES} 张表")
+        error_msg = t("error_max_tables", max=MAX_SELECTED_TABLES, default=f"最多只能选择 {MAX_SELECTED_TABLES} 张表")
+        raise HTTPException(status_code=400, detail=error_msg)
 
     store.update_sandbox(sandbox_id, {
         "tables": req.tables,
@@ -620,7 +636,7 @@ def _auto_execute(result_data: dict, allowed_tables: list[str], upload_rows: dic
         tool = step.get("tool", "").lower()
         code = step.get("code", "").strip()
         if not code:
-            step_results.append({"rows": [], "tables": [], "error": "空代码"})
+            step_results.append({"rows": [], "tables": [], "error": t("error_empty_code", default="空代码")})
             continue
 
         if tool == "sql":
@@ -645,7 +661,7 @@ def _auto_execute(result_data: dict, allowed_tables: list[str], upload_rows: dic
                 all_rows = rows
                 all_tables.extend(t for t in used_tables if t not in all_tables)
             except Exception as exc:
-                error_msg = f"SQL 执行失败 (step {i+1}): {str(exc)}"
+                error_msg = t("error_sql_failed", step=i+1, default=f"SQL 执行失败 (step {i+1})") + f": {str(exc)}"
                 step_results.append({"rows": [{"error": error_msg}], "tables": []})
                 return {"step_results": step_results, "error": error_msg}
 
@@ -669,11 +685,11 @@ def _auto_execute(result_data: dict, allowed_tables: list[str], upload_rows: dic
                 all_rows = result_rows
                 all_chart_specs.extend(result_charts)
             except Exception as exc:
-                error_msg = f"Python 执行失败 (step {i+1}): {str(exc)}"
+                error_msg = t("error_python_failed", step=i+1, default=f"Python 执行失败 (step {i+1})") + f": {str(exc)}"
                 step_results.append({"rows": [{"error": error_msg}], "tables": all_tables})
                 return {"step_results": step_results, "error": error_msg}
         else:
-            step_results.append({"rows": [], "tables": [], "error": f"未知工具: {tool}"})
+            step_results.append({"rows": [], "tables": [], "error": t("error_unknown_tool", tool=tool, default=f"未知工具: {tool}")})
 
     return {"rows": all_rows, "tables": all_tables, "chart_specs": all_chart_specs, "step_results": step_results}
 
@@ -691,10 +707,10 @@ def _resolve_selected_tables(requested_tables: list[str] | None, sandbox: dict, 
         if t and t not in normalized:
             normalized.append(t)
     if len(normalized) > max_selected_tables:
-        raise HTTPException(status_code=400, detail=f"最多可选择 {max_selected_tables} 张表")
+        raise HTTPException(status_code=400, detail=t("error_max_tables", max=max_selected_tables, default=f"最多可选择 {max_selected_tables} 张表"))
     denied = [t for t in normalized if t not in allowed_sandbox_tables]
     if denied:
-        raise HTTPException(status_code=403, detail=f"无权选择表: {', '.join(denied)}")
+        raise HTTPException(status_code=403, detail=t("error_no_permission_tables", tables=', '.join(denied), default=f"无权选择表: {', '.join(denied)}"))
     return normalized
 
 # ── Sandbox Workspace Management ──────────────────────────────────────
@@ -708,7 +724,7 @@ def create_sandbox(
     # Default to user's groups if none provided, ensuring they can see it
     groups = req.allowed_groups if req.allowed_groups else user.groups
     sandbox_id = store.create_sandbox(name=req.name, allowed_groups=groups)
-    return {"sandbox_id": sandbox_id, "message": "工作空间创建成功"}
+    return {"sandbox_id": sandbox_id, "message": t("msg_sandbox_created")}
 
 @app.put("/api/sandboxes/{sandbox_id}")
 def rename_sandbox(
@@ -720,7 +736,7 @@ def rename_sandbox(
     try:
         assert_sandbox_access(user, sandbox_id)
         sandbox = store.update_sandbox(sandbox_id, {"name": req.name})
-        return {"sandbox_id": sandbox_id, "name": sandbox["name"], "message": "重命名成功"}
+        return {"sandbox_id": sandbox_id, "name": sandbox["name"], "message": t("msg_sandbox_renamed")}
     except (ValueError, PermissionError) as exc:
         raise HTTPException(status_code=403, detail=str(exc))
 
@@ -734,6 +750,6 @@ def delete_sandbox(
         # Check permissions before deleting
         assert_sandbox_access(user, sandbox_id)
         store.delete_sandbox(sandbox_id)
-        return {"ok": True, "message": "工作空间已删除"}
+        return {"ok": True, "message": t("msg_sandbox_deleted")}
     except (ValueError, PermissionError) as exc:
         raise HTTPException(status_code=403, detail=str(exc))

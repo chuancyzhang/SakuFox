@@ -15,6 +15,7 @@ import re as _re
 
 import numpy as _np
 import pandas as pd
+from app.i18n import t
 
 # sklearn — imported lazily so missing package gives a clear error at sandbox call time
 try:
@@ -232,11 +233,10 @@ def run_python_pipeline(
     except (KeyError, IndexError) as exc:
         # Build helpful diagnostic message
         available_vars = sorted([k for k, v in shared_namespace.items() if not k.startswith("__")])
-        df_cols = []
-        if isinstance(shared_namespace.get("df"), pd.DataFrame):
-            df_cols = list(shared_namespace["df"].columns)
+        df_cols = list(shared_namespace["df"].columns) if isinstance(shared_namespace.get("df"), pd.DataFrame) else []
         
-        msg = f"访问出错: {str(exc)}\n可用变量: {available_vars}\n当前 df 字段: {df_cols}"
+        msg = t("error_python_access", exc=str(exc), vars=available_vars, cols=df_cols,
+                default=f"访问出错: {str(exc)}\n可用变量: {available_vars}\n当前 df 字段: {df_cols}")
         raise RuntimeError(msg) from exc
     except Exception as exc:
-        raise RuntimeError(f"Python 执行出错: {str(exc)}") from exc
+        raise RuntimeError(t("error_python_exec", exc=str(exc), default=f"Python 执行出错: {str(exc)}")) from exc

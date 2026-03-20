@@ -1,4 +1,5 @@
 import re
+from app.i18n import t
 
 
 FORBIDDEN = re.compile(r"\b(insert|update|delete|drop|alter|create|truncate|grant|revoke)\b", re.I)
@@ -12,16 +13,16 @@ def extract_tables(sql: str) -> list[str]:
 
 def enforce_select_only(sql: str) -> None:
     if not SELECT_PAT.search(sql):
-        raise ValueError("仅允许 SELECT 查询")
+        raise ValueError(t("error_select_only", default="仅允许 SELECT 查询"))
     if FORBIDDEN.search(sql):
-        raise ValueError("SQL 包含危险操作")
+        raise ValueError(t("error_danger_op", default="SQL 包含危险操作"))
 
 
 def enforce_table_whitelist(sql: str, allowed_tables: list[str]) -> list[str]:
     tables = extract_tables(sql)
     denied = [t for t in tables if t not in allowed_tables]
     if denied:
-        raise PermissionError(f"越权访问表: {','.join(denied)}")
+        raise PermissionError(t("error_denied_tables", tables=','.join(denied), default=f"越权访问表: {','.join(denied)}"))
     return tables
 
 

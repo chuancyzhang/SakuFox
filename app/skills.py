@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 
 from app.authorization import filter_tables_by_user
 from app.store import User, store
+from app.i18n import t
 
 
 def save_skill_from_proposal(
@@ -16,11 +17,11 @@ def save_skill_from_proposal(
 ) -> dict:
     proposal = store.proposals.get(proposal_id)
     if not proposal:
-        raise ValueError("提案不存在")
+        raise ValueError(t("error_proposal_not_found", default="提案不存在"))
     if proposal["user_id"] != user.user_id:
-        raise PermissionError("仅可保存自己的提案")
+        raise PermissionError(t("error_no_permission_save_proposal", default="仅可保存自己的提案"))
     if proposal["status"] != "executed":
-        raise ValueError("仅可保存已执行提案")
+        raise ValueError(t("error_not_executed_proposal", default="仅可保存已执行提案"))
 
     inherited_tables = filter_tables_by_user(user, proposal["tables"])
     steps = proposal.get("steps", [])

@@ -20,7 +20,10 @@
         <h1 style="letter-spacing: 0.5px;">SakuFox 🦊</h1>
         <span class="badge" style="background: linear-gradient(135deg, #fecaca, #fca5a5); border: none; color: #7f1d1d;">v1.0</span>
       </div>
-      <div class="user-area">
+      <div class="user-area" style="display: flex; align-items: center; gap: 12px;">
+        <button id="langToggle" class="btn btn-outline btn-sm" onclick="i18n.toggle()" style="border-radius: 20px; padding: 4px 12px; font-size: 12px;">
+          <i class="fa-solid fa-language"></i> <span id="langLabel">English / 中文</span>
+        </button>
         <div id="userInfo" class="user-info"></div>
       </div>
     </header>
@@ -28,22 +31,22 @@
     <div class="main-layout">
       <aside class="sidebar left-sidebar" id="leftSidebar">
         <div class="sidebar-header-actions">
-          <button class="toggle-btn" id="toggleLeftBtn" title="折叠"><i class="fa-solid fa-angles-left"></i></button>
+          <button class="toggle-btn" id="toggleLeftBtn" data-i18n-title="collapse"><i class="fa-solid fa-angles-left"></i></button>
         </div>
         <div class="sidebar-content">
           <div class="sidebar-section">
             <div class="section-header">
               <i class="fa-solid fa-filter"></i>
-              <h2>数据分析空间</h2>
+              <h2 data-i18n="data_space">数据分析空间</h2>
               <div class="sandbox-actions" style="margin-left: auto; display: flex; gap: 8px;">
-                <button id="btnNewSandbox" title="新建空间" class="icon-btn"><i class="fa-solid fa-plus"></i></button>
-                <button id="btnRenameSandbox" title="重命名" class="icon-btn" disabled><i class="fa-solid fa-pen"></i></button>
-                <button id="btnDeleteSandbox" title="删除" class="icon-btn" disabled><i class="fa-solid fa-trash"></i></button>
+                <button id="btnNewSandbox" data-i18n-title="new_sandbox" class="icon-btn"><i class="fa-solid fa-plus"></i></button>
+                <button id="btnRenameSandbox" data-i18n-title="rename" class="icon-btn" disabled><i class="fa-solid fa-pen"></i></button>
+                <button id="btnDeleteSandbox" data-i18n-title="delete" class="icon-btn" disabled><i class="fa-solid fa-trash"></i></button>
               </div>
             </div>
             <div class="select-wrapper">
               <select id="sandboxSelect" class="full-width-select" style="margin-bottom: 0;">
-                <option value="" disabled selected>选择工作空间...</option>
+                <option value="" disabled selected data-i18n="select_sandbox">选择工作空间...</option>
               </select>
             </div>
           </div>
@@ -51,21 +54,21 @@
           <div class="sidebar-section flex-grow">
             <div class="section-header">
               <i class="fa-solid fa-database"></i>
-              <h2>数据模型</h2>
+              <h2 data-i18n="data_models">数据模型</h2>
             </div>
             <ul id="tableList" class="nav-list">
-              <li class="empty-state">暂无数据表</li>
+              <li class="empty-state" data-i18n="no_tables">暂无数据表</li>
             </ul>
           </div>
             
             <div class="sidebar-section">
               <div class="section-header">
                 <i class="fa-solid fa-link"></i>
-                <h2>数据源管理</h2>
+                <h2 data-i18n="datasource_mgmt">数据源管理</h2>
               </div>
               <div class="db-form-box" style="display: flex; flex-direction: column; gap: 8px;">
-                <button id="openDbModalBtn" class="btn btn-primary btn-block"><i class="fa-solid fa-plus"></i> 关联外部数据库</button>
-                <button id="openUploadModalBtn" class="btn btn-outline btn-block"><i class="fa-solid fa-upload"></i> 上传本地文件</button>
+                <button id="openDbModalBtn" class="btn btn-primary btn-block"><i class="fa-solid fa-plus"></i> <span data-i18n="connect_db">关联外部数据库</span></button>
+                <button id="openUploadModalBtn" class="btn btn-outline btn-block"><i class="fa-solid fa-upload"></i> <span data-i18n="upload_files">上传本地文件</span></button>
               </div>
             </div>
           </div>
@@ -79,8 +82,8 @@
               <div class="icon-wrapper">
                 <i class="fa-solid fa-magnifying-glass-chart fa-3x"></i>
               </div>
-              <h3>开始你的数据探索</h3>
-              <p>输入分析需求，AI 将自主取数、分析、输出结论与猜想。<br />
+              <h3 data-i18n="welcome_title">开始你的数据探索</h3>
+              <p data-i18n="welcome_desc">输入分析需求，AI 将自主取数、分析、输出结论与猜想。<br />
                 您可以补充业务知识、选择猜想继续迭代，越分析越深入。</p>
             </div>
           </div>
@@ -90,9 +93,9 @@
           <div class="input-row">
             <div class="input-wrapper">
               <i class="fa-solid fa-wand-magic-sparkles"></i>
-              <input id="questionInput" placeholder="输入分析需求，或补充业务知识（前缀 知识: ）" autocomplete="off" />
+              <input id="questionInput" data-i18n="input_placeholder" placeholder="输入分析需求，或补充业务知识（前缀 知识: ）" autocomplete="off" />
             </div>
-            <button id="sendBtn" class="btn btn-primary btn-lg">发 送</button>
+            <button id="sendBtn" class="btn btn-primary btn-lg" data-i18n="send">发 送</button>
           </div>
         </div>
       </main>
@@ -100,41 +103,41 @@
       <div class="resizer" id="resizerRight"></div>
       <aside class="sidebar right-sidebar" id="rightSidebar">
         <div class="sidebar-header-actions">
-          <button class="toggle-btn" id="toggleRightBtn" title="折叠"><i class="fa-solid fa-angles-right"></i></button>
+          <button class="toggle-btn" id="toggleRightBtn" data-i18n-title="collapse"><i class="fa-solid fa-angles-right"></i></button>
         </div>
         <div class="sidebar-content">
           <div class="sidebar-section" style="margin-bottom: 20px;">
             <div class="section-header">
               <i class="fa-solid fa-floppy-disk"></i>
-              <h2>沉淀技能</h2>
+              <h2 data-i18n="save_skill">沉淀技能</h2>
             </div>
             <div class="save-skill-box" style="display:flex;flex-direction:column;gap:7px;">
-              <button id="proposeSkillBtn" class="btn btn-primary btn-block" style="margin-bottom:5px;"><i class="fa-solid fa-wand-magic-sparkles"></i> 将对话提炼为技能</button>
+              <button id="proposeSkillBtn" class="btn btn-primary btn-block" style="margin-bottom:5px;"><i class="fa-solid fa-wand-magic-sparkles"></i> <span data-i18n="extract_skill">将对话提炼为技能</span></button>
             </div>
           </div>
 
           <div class="sidebar-section flex-grow">
             <div class="section-header">
               <i class="fa-solid fa-layer-group"></i>
-              <h2>已沉淀技能</h2>
+              <h2 data-i18n="saved_skills">已沉淀技能</h2>
             </div>
             <ul id="skillList" class="nav-list" style="margin-bottom: 20px;">
-              <li class="empty-state">暂无沉淀技能</li>
+              <li class="empty-state" data-i18n="no_skills">暂无沉淀技能</li>
             </ul>
           </div>
           
           <div class="sidebar-section" style="border-top: 1px solid var(--border); padding-top: 10px;">
             <button id="btnNewSession" class="btn btn-outline btn-block" style="margin-bottom: 12px; border-style: dashed; border-color: var(--primary);">
-              <i class="fa-solid fa-plus"></i> 开启新对话
+              <i class="fa-solid fa-plus"></i> <span data-i18n="new_session">开启新对话</span>
             </button>
             <div class="section-header" style="justify-content: space-between; border-bottom: none; padding-bottom: 4px;">
               <div style="display:flex;align-items:center;gap:6px;">
                 <i class="fa-solid fa-clock-rotate-left"></i>
-                <h2>历史对话</h2>
+                <h2 data-i18n="history">历史对话</h2>
               </div>
             </div>
             <ul id="sessionList" class="nav-list" style="max-height: 280px; overflow-y: auto;">
-              <li class="empty-state">暂无历史对话</li>
+              <li class="empty-state" data-i18n="no_history">暂无历史对话</li>
             </ul>
           </div>
         </div>
@@ -146,7 +149,7 @@
   <div id="dbModal" class="modal-overlay" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 1000; justify-content: center; align-items: center;">
     <div class="modal-content" style="background: white; border-radius: 8px; width: 500px; max-width: 90%; max-height: 90vh; display: flex; flex-direction: column;">
       <div class="modal-header" style="padding: 16px 20px; border-bottom: 1px solid #e5e7eb; display: flex; justify-content: space-between; align-items: center;">
-        <h3 style="margin: 0; font-size: 18px; color: #111827;">关联外部数据库</h3>
+        <h3 style="margin: 0; font-size: 18px; color: #111827;" data-i18n="modal_db_title">关联外部数据库</h3>
         <button id="closeDbModalBtn" style="background: none; border: none; cursor: pointer; color: #6b7280;"><i class="fa-solid fa-xmark fa-lg"></i></button>
       </div>
       <div class="modal-body" style="padding: 20px; overflow-y: auto;">
@@ -167,17 +170,17 @@
           <input id="dbPassInput" type="password" placeholder="密码" style="flex: 1; border-radius: 4px; border: 1px solid #d1d5db; padding: 8px;" />
         </div>
         <div style="display: flex; gap: 12px;">
-          <button id="dbTestBtn" class="btn btn-outline" style="flex: 1; padding: 8px;">测试并连接</button>
-          <button id="dbRegisterBtn" class="btn btn-primary" style="flex: 2; padding: 8px; display: none;">获取数据表</button>
+          <button id="dbTestBtn" class="btn btn-outline" style="flex: 1; padding: 8px;" data-i18n="test_conn">测试并连接</button>
+          <button id="dbRegisterBtn" class="btn btn-primary" style="flex: 2; padding: 8px; display: none;" data-i18n="get_tables">获取数据表</button>
         </div>
         <div id="dbMsg" style="margin-top: 12px; font-size: 13px;"></div>
         
         <div id="dbTablesContainer" style="display: none; margin-top: 16px; border-top: 1px solid #e5e7eb; padding-top: 16px;">
-          <strong style="font-size: 14px; color: #374151; display: block; margin-bottom: 8px;">请选择要沙盒处理的表 (最多5张)</strong>
+          <strong style="font-size: 14px; color: #374151; display: block; margin-bottom: 8px;" data-i18n="choose_tables">请选择要沙盒处理的表 (最多5张)</strong>
           <div id="dbTablesList" style="max-height: 250px; overflow-y: auto; font-size: 13px; color: #4b5563; margin-bottom: 12px; border: 1px solid #d1d5db; border-radius: 4px; padding: 8px;">
             <!-- Checkboxes will be rendered here -->
           </div>
-          <button id="dbSaveTablesBtn" class="btn btn-primary" style="width: 100%; padding: 8px;">确认并关闭弹窗</button>
+          <button id="dbSaveTablesBtn" class="btn btn-primary" style="width: 100%; padding: 8px;" data-i18n="confirm_close">确认并关闭弹窗</button>
         </div>
       </div>
     </div>
@@ -186,16 +189,16 @@
   <div id="uploadModal" class="modal-overlay" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 1000; justify-content: center; align-items: center;">
     <div class="modal-content" style="background: white; border-radius: 8px; width: 450px; max-width: 90%; max-height: 90vh; display: flex; flex-direction: column;">
       <div class="modal-header" style="padding: 16px 20px; border-bottom: 1px solid #e5e7eb; display: flex; justify-content: space-between; align-items: center;">
-        <h3 style="margin: 0; font-size: 18px; color: #111827;">上传本地文件</h3>
+        <h3 style="margin: 0; font-size: 18px; color: #111827;" data-i18n="modal_upload_title">上传本地文件</h3>
         <button id="closeUploadModalBtn" style="background: none; border: none; cursor: pointer; color: #6b7280;"><i class="fa-solid fa-xmark fa-lg"></i></button>
       </div>
       <div class="modal-body" style="padding: 20px; overflow-y: auto;">
         <div style="margin-bottom: 16px;">
-          <label style="display: block; margin-bottom: 8px; font-weight: 500; font-size: 14px;">选择文件 (支持多选)</label>
+          <label style="display: block; margin-bottom: 8px; font-weight: 500; font-size: 14px;" data-i18n="upload_label">选择文件 (支持多选)</label>
           <input id="uploadInput" type="file" style="width: 100%; border: 1px dashed #d1d5db; border-radius: 6px; padding: 16px; background: #f9fafb;" accept=".csv,.xls,.xlsx,.txt,.json,.md,.log" multiple />
-          <p style="font-size: 12px; color: #6b7280; margin-top: 8px;">支持格式: .csv, .xls(x), .txt, .json, .md, .log<br/>文本将直接交由大模型作为背景知识理解；表格可被分析。</p>
+          <p style="font-size: 12px; color: #6b7280; margin-top: 8px;" data-i18n="upload_help">支持格式: .csv, .xls(x), .txt, .json, .md, .log<br/>文本将直接交由大模型作为背景知识理解；表格可被分析。</p>
         </div>
-        <button id="uploadBtn" class="btn btn-primary" style="width: 100%; padding: 10px;">开始上传并应用</button>
+        <button id="uploadBtn" class="btn btn-primary" style="width: 100%; padding: 10px;" data-i18n="start_upload">开始上传并应用</button>
       </div>
     </div>
   </div>
@@ -204,34 +207,35 @@
   <div id="skillModal" class="modal-overlay" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 1000; justify-content: center; align-items: center;">
     <div class="modal-content" style="background: white; border-radius: 8px; width: 500px; max-width: 90%; max-height: 90vh; display: flex; flex-direction: column;">
       <div class="modal-header" style="padding: 16px 20px; border-bottom: 1px solid #e5e7eb; display: flex; justify-content: space-between; align-items: center;">
-        <h3 style="margin: 0; font-size: 18px; color: #111827;"><i class="fa-solid fa-wand-magic-sparkles" style="color: var(--primary);"></i> 技能详情与提炼</h3>
+        <h3 style="margin: 0; font-size: 18px; color: #111827;"><i class="fa-solid fa-wand-magic-sparkles" style="color: var(--primary);"></i> <span data-i18n="modal_skill_title">技能详情与提炼</span></h3>
         <button id="closeSkillModalBtn" style="background: none; border: none; cursor: pointer; color: #6b7280;"><i class="fa-solid fa-xmark fa-lg"></i></button>
       </div>
       <div class="modal-body" style="padding: 20px; overflow-y: auto; display: flex; flex-direction: column; gap: 12px;">
         <div class="form-group">
-          <label style="display: block; margin-bottom: 6px; font-weight: 600; font-size: 13px;">技能名称 (必填)</label>
-          <input id="skillNameInput" placeholder="请输入技能名称..." style="width: 100%; padding-left: 10px;" />
+          <label style="display: block; margin-bottom: 6px; font-weight: 600; font-size: 13px;" data-i18n="skill_name">技能名称 (必填)</label>
+          <input id="skillNameInput" data-i18n="skill_name" style="width: 100%; padding-left: 10px;" />
         </div>
         <div class="form-group">
-          <label style="display: block; margin-bottom: 6px; font-weight: 600; font-size: 13px;">功能描述</label>
-          <textarea id="skillDescInput" rows="4" placeholder="一句话描述这个技能能做什么..." style="width: 100%; resize:vertical; border-radius:6px; border:1px solid var(--border); padding:10px; font-size:13px; line-height:1.5; min-height:80px;"></textarea>
+          <label style="display: block; margin-bottom: 6px; font-weight: 600; font-size: 13px;" data-i18n="skill_desc">功能描述</label>
+          <textarea id="skillDescInput" rows="4" data-i18n="skill_desc" style="width: 100%; resize:vertical; border-radius:6px; border:1px solid var(--border); padding:10px; font-size:13px; line-height:1.5; min-height:80px;"></textarea>
         </div>
         <div class="form-group">
-          <label style="display: block; margin-bottom: 6px; font-weight: 600; font-size: 13px;">标签 (逗号分隔)</label>
-          <input id="skillTagsInput" placeholder="例如: 财务, 销售, 日报" style="width: 100%; padding-left: 10px;" />
+          <label style="display: block; margin-bottom: 6px; font-weight: 600; font-size: 13px;" data-i18n="skill_tags">标签 (逗号分隔)</label>
+          <input id="skillTagsInput" data-i18n="skill_tags" style="width: 100%; padding-left: 10px;" />
         </div>
         <div class="form-group">
-          <label style="display: block; margin-bottom: 6px; font-weight: 600; font-size: 13px;">业务知识 (自动从会话提取，可补充)</label>
-          <textarea id="skillKnowledgeInput" rows="8" placeholder="业务规则、指标口径、字段说明..." style="width: 100%; resize:vertical; border-radius:6px; border:1px solid var(--border); padding:10px; font-size:13px; line-height:1.5; min-height:150px;"></textarea>
+          <label style="display: block; margin-bottom: 6px; font-weight: 600; font-size: 13px;" data-i18n="skill_knowledge">业务知识 (自动从会话提取，可补充)</label>
+          <textarea id="skillKnowledgeInput" rows="8" data-i18n="skill_knowledge" style="width: 100%; resize:vertical; border-radius:6px; border:1px solid var(--border); padding:10px; font-size:13px; line-height:1.5; min-height:150px;"></textarea>
         </div>
         <div style="margin-top: 8px;">
-           <button id="saveSkillBtn" class="btn btn-primary btn-block" style="padding: 10px;"><i class="fa-solid fa-bookmark"></i> 保存为技能</button>
+           <button id="saveSkillBtn" class="btn btn-primary btn-block" style="padding: 10px;"><i class="fa-solid fa-bookmark"></i> <span data-i18n="save">保存为技能</span></button>
         </div>
       </div>
     </div>
   </div>
 
   <script src="/web/common.js"></script>
+  <script>i18n.init();</script>
   <script src="/web/dashboard.js"></script>
 </body>
 

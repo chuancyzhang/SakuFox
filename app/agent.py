@@ -1,10 +1,12 @@
 import json
 import re
 from typing import Generator
+from pathlib import Path
 
 import httpx
 
 from app.config import AppConfig, load_config
+from app.i18n import t, get_lang
 
 
 # ── Public API ────────────────────────────────────────────────────────
@@ -49,28 +51,38 @@ def generate_data_insight(
 ) -> Generator[str, None, None]:
     """Multi-perspective insight generation (kept from original)."""
     if not data:
-        yield "未查询到数据，无法进行分析。"
+        msg = t("error_no_data", default="未查询到数据，无法进行分析。")
+        yield msg
         return
     preview_data = data[:20]
-    data_summary = f"共 {len(data)} 条数据，前 20 条预览：{json.dumps(preview_data, ensure_ascii=False)}"
+    count_label = t("label_total", default="共")
+    preview_label = t("label_preview", default="条数据，前 20 条预览")
+    data_summary = f"{count_label} {len(data)} {preview_label}：{json.dumps(preview_data, ensure_ascii=False)}"
 
     if config.llm_provider not in {"openai", "anthropic"}:
-        yield "### 数据分析报告\n\n"
-        yield f"- 记录数：{len(data)}\n"
+        report_title = t("report_title", default="### 数据分析报告\n\n")
+        count_label = t("label_record_count", default="- 记录数")
+        mock_msg = t("mock_msg", default="- 当前为 mock 模式，建议切换到 LLM 获取更深层商业洞察。")
+        yield report_title
+        yield f"{count_label}：{len(data)}\n"
         yield f"- SQL：`{sql}`\n"
-        yield "- 当前为 mock 模式，建议切换到 LLM 获取更深层商业洞察。\n"
+        yield f"{mock_msg}\n"
         return
 
+    question_label = t("label_user_question", default="用户问题")
+    sql_label = t("label_executed_sql", default="执行 SQL")
+    data_label = t("label_data_results", default="数据结果")
+    instruction = t("instruction_no_code", default="请输出面向业务负责人的分析结论，不要输出任何代码。")
     user_prompt = (
-        f"用户问题: {message}\n"
-        f"执行 SQL: {sql}\n"
-        f"数据结果: {data_summary}\n"
-        "请输出面向业务负责人的分析结论，不要输出任何代码。"
+        f"{question_label}: {message}\n"
+        f"{sql_label}: {sql}\n"
+        f"{data_label}: {data_summary}\n"
+        f"{instruction}"
     )
     agents: list[tuple[str, str]] = [
-        ("视角一：指标口径", config.insight_prompt_metrics),
-        ("视角二：异常归因", config.insight_prompt_anomaly),
-        ("视角三：经营动作", config.insight_prompt_actions),
+        (t("insight_title_metrics"), config.insight_prompt_metrics),
+        (t("insight_title_anomaly"), config.insight_prompt_anomaly),
+        (t("insight_title_actions"), config.insight_prompt_actions),
     ]
 
     for title, system_prompt in agents:
@@ -96,26 +108,34 @@ def _build_iteration_user_prompt(
     parts: list[str] = []
 
     # Business knowledge accumulated from user
+    is_en = get_lang() == "en"
+
     if business_knowledge:
-        parts.append("【已沉淀的业务知识】")
+        title = t("title_business_knowledge", default="【已沉淀的业务知识】")
+        parts.append(title)
         for i, bk in enumerate(business_knowledge, 1):
             parts.append(f"{i}. {bk}")
         parts.append("")
 
     # Past iteration summaries (compact)
     if iteration_history:
-        parts.append("【历史迭代摘要】")
+        title = t("title_historic_iterations", default="【历史迭代摘要】")
+        parts.append(title)
         for it in iteration_history[-5:]:  # last 5 iterations for context window
-            parts.append(f"- 迭代 {it.get('iteration_id', '?')}: {it.get('message', '')}")
+            iter_label = t("label_iteration", default="迭代")
+            parts.append(f"- {iter_label} {it.get('iteration_id', '?')}: {it.get('message', '')}")
             conclusions = it.get("conclusions", [])
             if conclusions:
                 for c in conclusions[:3]:
                     text = c.get("text", str(c)) if isinstance(c, dict) else str(c)
                     conf = c.get("confidence", "?") if isinstance(c, dict) else "?"
-                    parts.append(f"  结论(置信度{conf}): {text}")
+                    conclusion_label = t("label_conclusion", default="结论")
+                    conf_label = t("label_confidence", default="置信度")
+                    parts.append(f"  {conclusion_label}({conf_label} {conf}): {text}")
             hypotheses = it.get("hypotheses", [])
             if hypotheses:
-                parts.append(f"  提出猜想: {', '.join(h.get('text', str(h)) if isinstance(h, dict) else str(h) for h in hypotheses[:3])}...")
+                hypo_label = t("label_proposed_hypotheses", default="提出猜想")
+                parts.append(f"  {hypo_label}: {', '.join(h.get('text', str(h)) if isinstance(h, dict) else str(h) for h in hypotheses[:3])}...")
         parts.append("")
 
     # Current context: Tables, Schema, and Samples (Ground Truth)
@@ -131,50 +151,71 @@ def _build_iteration_user_prompt(
         # 1. Database Tables
         tables = sandbox.get("tables", [])
         if tables:
-            parts.append("【沙盒可用表详述 - Ground Truth】")
+            title = t("title_sandbox_tables", default="【沙盒可用表详述 - Ground Truth】")
+            parts.append(title)
             for tbl in tables:
                 info = context.get(tbl, {})
                 cols = info.get("columns", [])
                 sample = info.get("sample", [])
                 col_desc = ", ".join(f"{c['name']} ({c['type']})" for c in cols)
-                parts.append(f"表名: {tbl}")
-                parts.append(f"字段: {col_desc or '无法获取'}")
+                table_label = t("label_table_name", default="表名")
+                column_label = t("label_columns", default="字段")
+                sample_label = t("label_sample_data", default="样数据(前3行)")
+                parts.append(f"{table_label}: {tbl}")
+                parts.append(f"{column_label}: {col_desc or 'N/A'}")
                 if sample:
-                    parts.append(f"样数据(前3行): {json.dumps(sample, ensure_ascii=False)}")
+                    parts.append(f"{sample_label}: {json.dumps(sample, ensure_ascii=False)}")
                 parts.append("")
 
         # 2. Selected Uploaded Files
         if selected_files:
-            parts.append("【已加载的本地文件详述 - Ground Truth】")
+            title = t("title_uploaded_files", default="【已加载的本地文件详述 - Ground Truth】")
+            parts.append(title)
             for fname in selected_files:
                 info = context.get(fname, {})
                 cols = info.get("columns", [])
                 sample = info.get("sample", [])
-                path = upload_paths.get(fname, "未知路径")
+                path = upload_paths.get(fname, t("label_unknown_path", default="未知路径"))
                 
                 col_desc = ", ".join(f"{c['name']} ({c['type']})" for c in cols)
-                parts.append(f"文件名: {fname}")
-                parts.append(f"实际物理路径: {path}")
+                file_label = t("label_filename", default="文件名")
+                path_label = t("label_physical_path", default="实际物理路径")
+                column_label = t("label_columns", default="字段")
+                preview_label = t("label_content_preview", default="文件内容摘要/预览")
+                sample_label = t("label_sample_data", default="样数据(前3行)")
+                
+                parts.append(f"{file_label}: {fname}")
+                parts.append(f"{path_label}: {path}")
                 if cols:
-                    parts.append(f"字段: {col_desc}")
+                    parts.append(f"{column_label}: {col_desc}")
                 
                 text_preview = info.get("text_preview")
                 if text_preview:
-                    parts.append(f"文件内容摘要/预览: \n{text_preview}")
+                    parts.append(f"{preview_label}: \n{text_preview}")
                 
                 if sample:
-                    parts.append(f"样数据(前3行): {json.dumps(sample, ensure_ascii=False)}")
+                    parts.append(f"{sample_label}: {json.dumps(sample, ensure_ascii=False)}")
                 parts.append("")
 
-    parts.append(f"用户问题: {message}")
-    parts.append("【指令约束】")
-    parts.append("- 请合理编排 SQL 和 Python 步骤。")
-    parts.append("- SQL 结果会自动以 df0, df1... 注入 Python 变量，无需手动转换。")
-    parts.append("- 如果涉及多表对比，请分别写 SQL 获取数据，然后在 Python 中合并分析。")
-    parts.append("- **处理本地文件**：如果需要处理上传的文件，请直接在 Python 步骤中加载。")
-    parts.append("  - 表格文件 (Excel/CSV): 使用 `pd.read_excel(uploaded_file_paths['文件名'])` 或 `pd.read_csv(...)`。")
-    parts.append("  - 文本/知识文件 (TXT/JSON/MD): 使用 `Path(uploaded_file_paths['文件名']).read_text(encoding='utf-8')` 或标准 `open()`。")
-    parts.append("- 系统已预先注入了 `uploaded_file_paths` (物理路径字典) 和 `uploaded_dataframes` (已预加载的表格字典)。")
+    question_label = t("label_user_question", default="用户问题")
+    parts.append(f"{question_label}: {message}")
+    
+    # 5. Core Instruction Constraints
+    parts.append(f"\n{t('title_instruction_constraints', default='【指令约束】')}")
+    
+    constraint_keys = [
+        "constraint_sql_python",
+        "constraint_sql_injection",
+        "constraint_multi_table",
+        "constraint_local_files",
+        "constraint_tabular_files",
+        "constraint_text_files",
+        "constraint_pre_injection"
+    ]
+    for ck in constraint_keys:
+        val = t(ck)
+        if val:
+            parts.append(val)
 
     return "\n".join(parts)
 
@@ -271,7 +312,7 @@ def _run_iteration_by_llm(
         action_items = [str(action_items)] if action_items else []
     action_items = [str(a) for a in action_items if str(a).strip()]
 
-    explanation = str(parsed.get("explanation", "")) or "已完成本轮分析。"
+    explanation = str(parsed.get("explanation", "")) or t("agent_explanation_default")
 
     yield {
         "type": "result",
@@ -292,7 +333,7 @@ def _run_iteration_by_rules(message: str, sandbox: dict) -> Generator[dict, None
     if not table:
         raise RuntimeError("当前沙盒没有可用数据表")
 
-    yield {"type": "thought", "content": "当前未启用 LLM，返回通用探查分析；建议配置 LLM 以实现 AI 自主迭代分析。"}
+    yield {"type": "thought", "content": t("agent_fallback_thought")}
 
     sql = f"SELECT * FROM {table} LIMIT 200"
     yield {
@@ -301,15 +342,15 @@ def _run_iteration_by_rules(message: str, sandbox: dict) -> Generator[dict, None
             "steps": [{"tool": "sql", "code": sql}],
             "tools_used": ["execute_select_sql"],
             "conclusions": [
-                {"text": f"通用数据探查：从 {table} 取样 200 行。建议配置 LLM 以获得自主分析能力。", "confidence": 1.0},
+                {"text": t("agent_fallback_conclusion", table=table), "confidence": 1.0},
             ],
             "hypotheses": [
                 {"id": "h1", "text": "补充业务目标与时间范围，便于 AI 自动规划分析路径"},
                 {"id": "h2", "text": "上传本地 CSV/Excel，与线上数据做联合分析"},
                 {"id": "h3", "text": "配置 LLM 后开启智能迭代分析"},
             ],
-            "action_items": ["配置 LLM provider 以启用 AI 自主分析能力"],
-            "explanation": "当前为 mock 模式，仅提供通用数据探查。",
+            "action_items": [t("agent_fallback_item_1")],
+            "explanation": t("agent_explanation_mock"),
         },
     }
 
@@ -538,16 +579,29 @@ def generate_skill_proposal(
     model: str | None = None,
 ) -> dict:
     """Uses LLM to summarize a successful analysis into a skill proposal."""
-    config = load_config()
-    selected_provider = (provider or config.llm_provider).lower()
+    from app.i18n import t, get_lang
+    is_en = get_lang() == "en"
+    system_prompt = "You are a business knowledge extraction expert. Please extract a reusable 'analysis skill' from the user's question, analysis process, and conclusions." if is_en else "你是一个业务知识提炼专家。请根据用户的提问、分析过程和结论，提取一个可复用的“分析技能”。"
+    user_prompt_template = """
+User Question: {message}
+Sandbox: {sandbox_name}
+Conclusions: {conclusions}
+Steps: {steps}
+Explanation: {explanation}
 
-    system_prompt = "你是一个业务知识提炼专家。请根据用户的提问、分析过程和结论，提取一个可复用的“分析技能”。"
-    user_prompt = f"""
+Please return a JSON object with:
+1. "name": Skill name (related to context and concise)
+2. "description": Detailed description of the skill
+3. "tags": List of keyword tags (3-5)
+4. "knowledge": Core business knowledge (rules, formulas, field meanings, etc. - be very detailed so it can be reused).
+
+Return ONLY JSON.
+""" if is_en else """
 用户问题: {message}
 沙盒名称: {sandbox_name}
-分析结论: {json.dumps(analysis_result.get('conclusions', []), ensure_ascii=False)}
-分析步骤: {json.dumps(analysis_result.get('steps', []), ensure_ascii=False)}
-核心解释: {analysis_result.get('explanation', '')}
+分析结论: {conclusions}
+分析步骤: {steps}
+核心解释: {explanation}
 
 请返回一个 JSON 对象，包含以下字段：
 1. "name": 技能名称（与整个对话内容高度相关，并且简洁）
@@ -557,6 +611,13 @@ def generate_skill_proposal(
 
 仅返回 JSON，不要任何解释文字。
 """
+    user_prompt = user_prompt_template.format(
+        message=message,
+        sandbox_name=sandbox_name,
+        conclusions=json.dumps(analysis_result.get('conclusions', []), ensure_ascii=False),
+        steps=json.dumps(analysis_result.get('steps', []), ensure_ascii=False),
+        explanation=analysis_result.get('explanation', '')
+    )
 
     full_content = ""
     try:
