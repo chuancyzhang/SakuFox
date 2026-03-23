@@ -1,5 +1,6 @@
 {
   "app_title": "SakuFox 🦊 - Agile Analytics Platform",
+  "nav_brand": "SakuFox 🦊",
   "data_space": "Data Space",
   "new_sandbox": "New Sandbox",
   "rename": "Rename",
@@ -145,5 +146,23 @@
   "success_update": "Successfully updated: ",
   "success_save": "Successfully saved: ",
   "load_config_failed": "Failed to load config",
-  "collapse": "Collapse"
+  "collapse": "Collapse",
+  "nav_analysis": "Analysis",
+  "nav_knowledge": "Knowledge Config",
+  "mount_kb": "Mount KBs",
+  "title_mount_kb": "Mount Knowledge Bases",
+  "desc_mount_kb": "Select the knowledge bases to be mounted into testing context:",
+  "no_global_kbs": "No global KBs available, please create one first.",
+  "knowledge_title": "Knowledge Config - SakuFox 🦊",
+  "kb_management": "Knowledge Management",
+  "kb_management_desc": "Centrally configure and maintain domain knowledge. It will be injected as prior context during AI reasoning.",
+  "create_kb": "Create Knowledge Base",
+  "no_kbs": "No knowledge bases found. Click the button above to create one.",
+  "kb_name": "Name",
+  "kb_desc": "Description",
+  "type_manual": "Manual Text",
+  "type_api": "API Sync",
+  "kb_content": "Knowledge Content",
+  "api_pull_hint": "Click the sync button in the list to pull data from API.",
+  "estimated_tokens": "Est. Tokens: {count}"
 }

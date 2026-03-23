@@ -28,9 +28,10 @@ const i18n = {
                 const text = this.t(key);
                 if (el.tagName === "INPUT" || el.tagName === "TEXTAREA") {
                     el.placeholder = text;
-                } else {
-                    // Try to preserve internal <i> icon if it's the first child
-                    const icon = el.querySelector(":scope > i.fa-solid, :scope > i.fa-brands");
+                } else if (text && text !== key) {
+                    // Only update if we have a valid translation
+                    // Try to preserve internal <i> icon
+                    const icon = el.querySelector(":scope > i[class*='fa-']");
                     if (icon) {
                         el.innerHTML = icon.outerHTML + " " + text;
                     } else {
@@ -40,7 +41,10 @@ const i18n = {
             }
 
             if (titleKey) {
-                el.title = this.t(titleKey);
+                const titleText = this.t(titleKey);
+                if (titleText && titleText !== titleKey) {
+                    el.title = titleText;
+                }
             }
         });
     },

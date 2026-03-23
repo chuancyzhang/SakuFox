@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title data-i18n="knowledge_title">知识库配置 - SakuFox 🦊</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  <link rel="stylesheet" href="/web/styles.css" />
+  <style>
+    body { background-color: #f8fafc; margin: 0; font-family: 'Inter', system-ui, sans-serif; }
+    .page-container { max-width: 1000px; margin: 40px auto; padding: 0 20px; }
+    .top-actions { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; }
+    .kb-card { background: white; border-radius: 8px; border: 1px solid #e2e8f0; padding: 20px; margin-bottom: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }
+    .kb-header { display: flex; justify-content: space-between; border-bottom: 1px solid #f1f5f9; padding-bottom: 12px; margin-bottom: 12px; }
+    .kb-title { font-size: 18px; font-weight: 600; color: #1e293b; margin: 0 0 4px 0; }
+    .kb-desc { font-size: 14px; color: #64748b; margin: 0; }
+    .kb-meta { font-size: 12px; color: #94a3b8; display: flex; gap: 16px; }
+    .kb-meta span { display: inline-flex; align-items: center; gap: 4px; }
+    .kb-actions { display: flex; gap: 8px; align-items: flex-start; }
+    
+    .sync-type-toggle { display: flex; width: 100%; border: 1px solid #e2e8f0; border-radius: 6px; overflow: hidden; margin-bottom: 16px; font-size: 14px; }
+    .sync-type-toggle label { flex: 1; text-align: center; background: #f8fafc; color: #64748b; padding: 8px 0; cursor: pointer; border-right: 1px solid #e2e8f0; font-weight: 500;}
+    .sync-type-toggle label:last-child { border-right: none; }
+    .sync-type-toggle input[type="radio"] { display: none; }
+    .sync-type-toggle input[type="radio"]:checked + label { background: #fee2e2; color: #ef4444; font-weight: 600; }
+    
+    .api-settings { background: #f8fafc; border: 1px dashed #cbd5e1; border-radius: 6px; padding: 16px; margin-bottom: 16px; }
+  </style>
+</head>
+
+<body>
+  <div class="app-container" style="display: block; height: auto;">
+    <header class="topbar" style="position: sticky; top: 0; z-index: 100;">
+      <div class="logo-area">
+        <i class="fas fa-fox fa-lg logo-icon" style="color: #fca5a5;"></i>
+        <h1 style="letter-spacing: 0.5px;" data-i18n="nav_brand">SakuFox 🦊</h1>
+        <span class="badge" style="background: linear-gradient(135deg, #fecaca, #fca5a5); border: none; color: #7f1d1d;">v1.0</span>
+      </div>
+      <div class="nav-menu" style="flex: 1; display: flex; align-items: center; margin-left: 32px; gap: 24px;">
+        <a href="/dashboard" class="nav-link" data-i18n="nav_analysis" style="color: #64748b; text-decoration: none; font-weight: 500; font-size: 15px; padding-bottom: 4px; transition: color 0.2s;" onmouseover="this.style.color='#2b3a4a'" onmouseout="this.style.color='#64748b'">数据分析</a>
+        <a href="/web/knowledge.html" class="nav-link active" data-i18n="nav_knowledge" style="color: #2b3a4a; text-decoration: none; font-weight: 600; font-size: 15px; border-bottom: 2px solid #ef4444; padding-bottom: 4px;">知识库配置</a>
+      </div>
+      <div class="user-area" style="display: flex; align-items: center; gap: 12px;">
+        <button class="btn btn-outline btn-sm" onclick="i18n.toggle()" style="border-radius: 20px; padding: 4px 12px; font-size: 12px;">
+          <i class="fas fa-language"></i> <span id="langLabel">English / 中文</span>
+        </button>
+        <div id="userInfo" class="user-info"></div>
+      </div>
+    </header>
+
+    <div class="page-container">
+      <div class="top-actions">
+        <div>
+          <h2 style="margin: 0; color: #0f172a; font-size: 24px;" data-i18n="kb_management">知识库管理</h2>
+          <p style="margin: 4px 0 0 0; color: #64748b; font-size: 14px;" data-i18n="kb_management_desc">在这里集中配置与维护业务常识，供模型分析时作为先验上下文调用。</p>
+        </div>
+        <button id="btnCreateKB" class="btn btn-primary"><i class="fas fa-plus"></i> <span data-i18n="create_kb">新建知识库</span></button>
+      </div>
+
+      <div id="kbList">
+        <!-- JS rendered cards -->
+        <div style="text-align: center; padding: 40px; color: #94a3b8;"><i class="fas fa-circle-notch fa-spin fa-2x"></i></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- KB Modal -->
+  <div id="kbModal" class="modal-overlay" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 1000; justify-content: center; align-items: center;">
+    <div class="modal-content" style="background: white; border-radius: 8px; width: 600px; max-width: 90%; max-height: 90vh; display: flex; flex-direction: column;">
+      <div class="modal-header" style="padding: 16px 20px; border-bottom: 1px solid #e5e7eb; display: flex; justify-content: space-between; align-items: center;">
+        <h3 id="kbModalTitle" style="margin: 0; font-size: 18px; color: #111827;">新建知识库</h3>
+        <button onclick="document.getElementById('kbModal').style.display='none'" style="background: none; border: none; cursor: pointer; color: #6b7280;"><i class="fas fa-xmark"></i></button>
+      </div>
+      <div class="modal-body" style="padding: 20px; overflow-y: auto; flex: 1;">
+        <input type="hidden" id="kbIdInput" />
+        
+        <div class="form-group" style="margin-bottom: 16px;">
+          <label style="display: block; margin-bottom: 6px; font-weight: 500; font-size: 14px;" data-i18n="kb_name">名称 <span style="color:#ef4444">*</span></label>
+          <input id="kbNameInput" style="width: 100%; padding: 8px 12px; border: 1px solid #cbd5e1; border-radius: 4px; font-size: 14px;" placeholder="例如：产品术语表" />
+        </div>
+        
+        <div class="form-group" style="margin-bottom: 16px;">
+          <label style="display: block; margin-bottom: 6px; font-weight: 500; font-size: 14px;" data-i18n="kb_desc">描述</label>
+          <input id="kbDescInput" style="width: 100%; padding: 8px 12px; border: 1px solid #cbd5e1; border-radius: 4px; font-size: 14px;" placeholder="该知识库的简要说明..." />
+        </div>
+
+        <div class="sync-type-toggle">
+          <input type="radio" id="syncManual" name="syncType" value="manual" checked>
+          <label for="syncManual"><i class="fas fa-keyboard"></i> <span data-i18n="type_manual">手动配置文本</span></label>
+          <input type="radio" id="syncApi" name="syncType" value="api">
+          <label for="syncApi"><i class="fas fa-cloud-arrow-down"></i> <span data-i18n="type_api">API 接口拉取</span></label>
+        </div>
+
+        <div id="manualSection">
+          <label style="display: block; margin-bottom: 6px; font-weight: 500; font-size: 14px;" data-i18n="kb_content">知识内容</label>
+          <textarea id="kbContentInput" style="width: 100%; height: 200px; padding: 12px; border: 1px solid #cbd5e1; border-radius: 4px; font-size: 14px; resize: vertical; margin-bottom: 4px;"></textarea>
+          <div class="text-sm" style="color: #64748b; margin-bottom: 16px;" id="kbTokenHint">当前令牌数估计: 0 Tokens</div>
+        </div>
+
+        <div id="apiSection" style="display: none;">
+          <div class="api-settings">
+            <div style="display: flex; gap: 12px; margin-bottom: 12px;">
+              <div style="width: 100px;">
+                <label style="display: block; margin-bottom: 4px; font-size: 13px; font-weight: 500;">Method</label>
+                <select id="apiMethodInput" style="width: 100%; padding: 6px; border: 1px solid #cbd5e1; border-radius: 4px; font-size: 13px;">
+                  <option value="GET">GET</option>
+                  <option value="POST">POST</option>
+                </select>
+              </div>
+              <div style="flex: 1;">
+                <label style="display: block; margin-bottom: 4px; font-size: 13px; font-weight: 500;">URL <span style="color:#ef4444">*</span></label>
+                <input id="apiUrlInput" style="width: 100%; padding: 6px; border: 1px solid #cbd5e1; border-radius: 4px; font-size: 13px;" placeholder="https://..." />
+              </div>
+            </div>
+            
+            <div style="margin-bottom: 12px;">
+              <label style="display: block; margin-bottom: 4px; font-size: 13px; font-weight: 500;">Headers (JSON format)</label>
+              <textarea id="apiHeadersInput" style="width: 100%; height: 60px; padding: 6px; border: 1px solid #cbd5e1; border-radius: 4px; font-size: 13px; font-family: monospace;" placeholder='{"Authorization": "Bearer token"}'></textarea>
+            </div>
+            
+            <div style="margin-bottom: 12px;">
+              <label style="display: block; margin-bottom: 4px; font-size: 13px; font-weight: 500;">Params / Body (JSON format)</label>
+              <textarea id="apiParamsInput" style="width: 100%; height: 60px; padding: 6px; border: 1px solid #cbd5e1; border-radius: 4px; font-size: 13px; font-family: monospace;" placeholder='{"page_id": "123"}'></textarea>
+            </div>
+            
+            <div>
+              <label style="display: block; margin-bottom: 4px; font-size: 13px; font-weight: 500;">JSON Path (Optional)</label>
+              <input id="apiJsonPathInput" style="width: 100%; padding: 6px; border: 1px solid #cbd5e1; border-radius: 4px; font-size: 13px;" placeholder="例如: data.content" />
+              <p style="font-size: 11px; color:#64748b; margin: 4px 0 0 0;">用于提取接口返回的特定字段，为空则取 Entire Response</p>
+            </div>
+          </div>
+        </div>
+
+      </div>
+      <div class="modal-footer" style="padding: 16px 20px; border-top: 1px solid #e5e7eb; display: flex; justify-content: flex-end; gap: 12px;">
+        <button class="btn btn-outline" onclick="document.getElementById('kbModal').style.display='none'" data-i18n="cancel">取消</button>
+        <button class="btn btn-primary" id="btnSaveKB" data-i18n="save">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/web/common.js"></script>
+  <script>i18n.init();</script>
+  <script src="/web/knowledge.js"></script>
+</body>
+</html>

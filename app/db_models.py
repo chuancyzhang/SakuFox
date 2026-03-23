@@ -22,6 +22,23 @@ class DBSandbox(Base):
     uploads = Column(JSON)  # dict[str, list[dict]]
     upload_paths = Column(JSON)  # dict[str, str]
     db_config = Column(JSON)  # dict (optional external db config)
+    knowledge_bases = Column(JSON) # list[str], knowledge base IDs
+
+class DBKnowledgeBase(Base):
+    __tablename__ = "knowledge_bases"
+    id = Column(String(50), primary_key=True)
+    name = Column(String(255))
+    description = Column(Text)
+    sync_type = Column(String(50)) # 'manual', 'api'
+    content = Column(Text)
+    token_count = Column(Integer)
+    api_url = Column(String(500))
+    api_method = Column(String(10))
+    api_headers = Column(JSON)
+    api_params = Column(JSON)
+    api_json_path = Column(String(255)) # JSON path to extract content
+    created_at = Column(String(50))
+    updated_at = Column(String(50))
 
 class DBSession(Base):
     __tablename__ = "sessions"
@@ -55,7 +72,10 @@ class DBSkill(Base):
     description = Column(Text)
     tags = Column(JSON)
     layers = Column(JSON) # includes knowledge, tables, etc.
+    version = Column(Integer, default=1)
+    history = Column(JSON)
     created_at = Column(String(50))
+    updated_at = Column(String(50))
 
 class DBProposal(Base):
     __tablename__ = "proposals"

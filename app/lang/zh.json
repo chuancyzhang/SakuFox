@@ -2,10 +2,10 @@
   "error_session_not_found": "会话不存在",
   "error_proposal_not_found": "提案不存在",
   "error_no_permission_proposal": "无权分析该提案",
-  "error_no_permission_skill": "无权操作该技能",
-  "error_skill_not_found": "技能不存在",
+  "error_no_permission_skill": "无权操作该经验",
+  "error_skill_not_found": "经验不存在",
   "error_sandbox_no_tables": "当前沙盒没有可用数据表",
-  "msg_skill_saved": "技能已保存",
+  "msg_skill_saved": "经验已保存",
   "msg_session_deleted": "会话已删除",
   "msg_sandbox_created": "工作空间创建成功",
   "msg_sandbox_renamed": "重命名成功",
@@ -72,8 +72,8 @@
   "constraint_tabular_files": "  - 表格文件 (Excel/CSV): 使用 `pd.read_excel(uploaded_file_paths['文件名'])` 或 `pd.read_csv(...)`。",
   "constraint_text_files": "  - 文本/知识文件 (TXT/JSON/MD): 使用 `Path(uploaded_file_paths['文件名']).read_text(encoding='utf-8')` 或标准 `open()`。",
   "constraint_pre_injection": "- 系统已预先注入了 `uploaded_file_paths` (物理路径字典) 和 `uploaded_dataframes` (已预加载的表格字典)。",
-  "system_prompt_skill_extraction": "你是一个业务知识提炼专家。请根据用户的提问、分析过程和结论，提取一个可复用的“分析技能”。",
-  "user_prompt_skill_extraction": "\n用户问题: {message}\n沙盒名称: {sandbox_name}\n分析结论: {conclusions}\n分析步骤: {steps}\n核心解释: {explanation}\n\n请返回一个 JSON 对象，包含以下字段：\n1. \"name\": 技能名称（与整个对话内容高度相关，并且简洁）\n2. \"description\": 技能描述（要非常详细的描述）\n3. \"tags\": 关键词标签列表（3-5个）\n4. \"knowledge\": 提炼的核心业务知识（要非常详细的业务知识，包含交互流程、业务规则、指标口径、字段说明等所有知识，要让一个普通人拿到这个技能描述能直接用起来例如：某某指标计算公式、业务判定逻辑、关键字段的业务含义。每条知识点要独立且精确，可以被后续对话直接参考）\n\n仅返回 JSON，不要任何解释文字。",
+  "system_prompt_skill_extraction": "你是一个业务知识提炼专家。请根据用户的提问、分析过程和结论，提取一个可复用的“分析经验”。",
+  "user_prompt_skill_extraction": "\n用户问题: {message}\n沙盒名称: {sandbox_name}\n分析结论: {conclusions}\n分析步骤: {steps}\n核心解释: {explanation}\n\n请返回一个 JSON 对象，包含以下字段：\n1. \"name\": 经验名称（与整个对话内容高度相关，并且简洁）\n2. \"description\": 经验描述（要非常详细的描述）\n3. \"tags\": 关键词标签列表（3-5个）\n4. \"knowledge\": 提炼的核心业务知识（要非常详细的业务知识，包含交互流程、业务规则、指标口径、字段说明等所有知识，要让一个普通人拿到这个经验描述能直接用起来例如：某某指标计算公式、业务判定逻辑、关键字段的业务含义。每条知识点要独立且精确，可以被后续对话直接参考）\n\n仅返回 JSON，不要任何解释文字。",
   "agent_fallback_item_1": "补充业务目标与时间范围，便于 AI 自动规划分析路径",
   "agent_fallback_item_2": "上传本地 CSV/Excel，与线上数据做联合分析",
   "agent_fallback_item_3": "配置 LLM 后开启智能迭代分析",
@@ -81,5 +81,5 @@
   "iterations_count": "{count} 轮",
   "step_label": "步骤",
   "error_wait_retry": "分析过程中断，请重试",
-  "app_title": "SakuFox 🦊 - 敏捷智能数据分析平台"
+  "app_title": "SakuFox \ud83e\udd8a - 敏捷智能数据分析平台"
 }

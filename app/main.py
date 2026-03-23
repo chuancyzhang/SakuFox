@@ -30,6 +30,9 @@ from app.models import (
     UpdateSkillRequest,
     CreateSandboxRequest,
     RenameSandboxRequest,
+    CreateKnowledgeBaseRequest,
+    UpdateKnowledgeBaseRequest,
+    MountKnowledgeBasesRequest
 )
 from app.python_sandbox import run_python_pipeline
 from app.skills import list_skills, save_skill_from_proposal
@@ -142,7 +145,17 @@ def iterate(req: IterateRequest, user: User = Depends(get_current_user)):
                     break
 
     iteration_history = store.get_iteration_history(user.user_id, session_id)
-    business_knowledge = store.get_business_knowledge(req.sandbox_id)
+    
+    # Merge global knowledge bases and sandbox-specific business knowledge
+    business_knowledge = []
+    kb_ids = sandbox.get("knowledge_bases", [])
+    for kb_id in kb_ids:
+        kb = store.get_knowledge_base(kb_id)
+        if kb and kb.get("content"):
+            business_knowledge.append(f"[{kb.get('name')}]: {kb.get('content')}")
+            
+    # Append local business knowledge
+    business_knowledge.extend(store.get_business_knowledge(req.sandbox_id))
 
     def stream_generator():
         try:
@@ -407,6 +420,7 @@ def save_skill(req: SaveSkillRequest, user: User = Depends(get_current_user)):
             extra_knowledge=req.knowledge,
             table_descriptions=req.table_descriptions,
             session_id=session_id,
+            overwrite_skill_id=req.overwrite_skill_id,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -465,17 +479,29 @@ def update_skill(skill_id: str, req: UpdateSkillRequest, user: User = Depends(ge
         raise HTTPException(status_code=404, detail=t("error_skill_not_found"))
     if skill["owner_id"] != user.user_id:
         raise HTTPException(status_code=403, detail=t("error_no_permission_skill"))
-    with store._lock:
-        if req.name is not None:
-            skill["name"] = req.name
-        if req.description is not None:
-            skill["description"] = req.description
-        if req.tags is not None:
-            skill["tags"] = req.tags
+    
+    updates = {}
+    if req.name is not None:
+        updates["name"] = req.name
+    if req.description is not None:
+        updates["description"] = req.description
+    if req.tags is not None:
+        updates["tags"] = req.tags
+        
+    # We need to deep copy the layers since mutating dict elements directly is complicated
+    # But since we have the existing skill, we'll extract its layers to modify
+    if req.knowledge is not None or req.table_descriptions is not None:
+        layers = dict(skill.get("layers") or {})
         if req.knowledge is not None:
-            skill.setdefault("layers", {})["knowledge"] = req.knowledge
+            layers["knowledge"] = req.knowledge
         if req.table_descriptions is not None:
-            skill.setdefault("layers", {})["tables"] = req.table_descriptions
+            layers["tables"] = req.table_descriptions
+        updates["layers"] = layers
+
+    if updates:
+        store.update_skill(skill_id, updates)
+        skill = store.skills.get(skill_id) # reload to get updated version
+
     return {"skill_id": skill_id, **skill}
 
 
@@ -753,3 +779,101 @@ def delete_sandbox(
         return {"ok": True, "message": t("msg_sandbox_deleted")}
     except (ValueError, PermissionError) as exc:
         raise HTTPException(status_code=403, detail=str(exc))
+
+# ── Knowledge Bases ───────────────────────────────────────────────────
+
+def estimate_tokens(text: str) -> int:
+    if not text: return 0
+    # Simple heuristic: 1 char ~ 0.75 tokens, roughly for Chinese/English mix
+    return int(len(text) * 0.75)
+
+
+@app.post("/api/knowledge_bases")
+def create_knowledge_base(req: CreateKnowledgeBaseRequest, user: User = Depends(get_current_user)):
+    data = req.model_dump(exclude_unset=True)
+    if data.get("content"):
+        data["token_count"] = estimate_tokens(data["content"])
+    kb_id = store.create_knowledge_base(data)
+    return store.get_knowledge_base(kb_id)
+
+
+@app.get("/api/knowledge_bases")
+def list_knowledge_bases(user: User = Depends(get_current_user)):
+    return {"knowledge_bases": store.list_knowledge_bases()}
+
+
+@app.patch("/api/knowledge_bases/{kb_id}")
+def update_knowledge_base(kb_id: str, req: UpdateKnowledgeBaseRequest, user: User = Depends(get_current_user)):
+    data = req.model_dump(exclude_unset=True)
+    if "content" in data:
+        data["token_count"] = estimate_tokens(data["content"] or "")
+    try:
+        updated = store.update_knowledge_base(kb_id, data)
+        return updated
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Knowledge base not found")
+
+
+@app.delete("/api/knowledge_bases/{kb_id}")
+def delete_knowledge_base(kb_id: str, user: User = Depends(get_current_user)):
+    if store.delete_knowledge_base(kb_id):
+        return {"deleted": kb_id}
+    raise HTTPException(status_code=404, detail="Knowledge base not found")
+
+
+@app.post("/api/knowledge_bases/{kb_id}/sync")
+async def sync_knowledge_base(kb_id: str, user: User = Depends(get_current_user)):
+    kb = store.get_knowledge_base(kb_id)
+    if not kb:
+        raise HTTPException(status_code=404, detail="Knowledge base not found")
+    
+    if kb.get("sync_type") != "api":
+        raise HTTPException(status_code=400, detail="Not an API knowledge base")
+    
+    url = kb.get("api_url")
+    if not url:
+        raise HTTPException(status_code=400, detail="Missing API URL")
+    
+    import httpx
+    try:
+        async with httpx.AsyncClient() as client:
+            headers = kb.get("api_headers") or {}
+            params = kb.get("api_params") or {}
+            method = (kb.get("api_method") or "GET").upper()
+            
+            if method == "POST":
+                r = await client.post(url, headers=headers, json=params, timeout=10.0)
+            else:
+                r = await client.get(url, headers=headers, params=params, timeout=10.0)
+            
+            r.raise_for_status()
+            content = r.text
+            
+            json_path = kb.get("api_json_path")
+            if json_path and r.headers.get("content-type", "").startswith("application/json"):
+                data = r.json()
+                for key in json_path.split("."):
+                    if isinstance(data, dict) and key in data:
+                        data = data[key]
+                    else:
+                        break
+                content = str(data) if data is not None else ""
+            
+            updated = store.update_knowledge_base(kb_id, {
+                "content": content,
+                "token_count": estimate_tokens(content)
+            })
+            return {"status": "success", "token_count": updated.get("token_count")}
+            
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/sandboxes/{sandbox_id}/knowledge_bases")
+def mount_knowledge_bases(sandbox_id: str, req: MountKnowledgeBasesRequest, user: User = Depends(get_current_user)):
+    try:
+        assert_sandbox_access(user, sandbox_id)
+        store.update_sandbox(sandbox_id, {"knowledge_bases": req.knowledge_bases})
+        return {"sandbox_id": sandbox_id, "knowledge_bases": req.knowledge_bases}
+    except (ValueError, PermissionError) as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+

@@ -34,6 +34,7 @@ class SaveSkillRequest(BaseModel):
     tags: list[str] | None = None
     knowledge: list[str] | None = None  # extra business knowledge lines
     table_descriptions: list[dict] | None = None  # [{"table": ..., "description": ...}]
+    overwrite_skill_id: str | None = None
 
 
 class UpdateSessionRequest(BaseModel):
@@ -61,3 +62,31 @@ class CreateSandboxRequest(BaseModel):
 
 class RenameSandboxRequest(BaseModel):
     name: str
+
+
+class CreateKnowledgeBaseRequest(BaseModel):
+    name: str
+    description: str | None = None
+    sync_type: str = Field(default="manual", pattern="^(manual|api)$")
+    content: str | None = None
+    api_url: str | None = None
+    api_method: str | None = "GET"
+    api_headers: dict | None = None
+    api_params: dict | None = None
+    api_json_path: str | None = None
+
+
+class UpdateKnowledgeBaseRequest(BaseModel):
+    name: str | None = None
+    description: str | None = None
+    sync_type: str | None = None
+    content: str | None = None
+    api_url: str | None = None
+    api_method: str | None = None
+    api_headers: dict | None = None
+    api_params: dict | None = None
+    api_json_path: str | None = None
+
+
+class MountKnowledgeBasesRequest(BaseModel):
+    knowledge_bases: list[str]
