@@ -23,6 +23,7 @@ class DBSandbox(Base):
     upload_paths = Column(JSON)  # dict[str, str]
     db_config = Column(JSON)  # dict (optional external db config)
     knowledge_bases = Column(JSON) # list[str], knowledge base IDs
+    mounted_skills = Column(JSON)  # list[str], mounted skill IDs
 
 class DBKnowledgeBase(Base):
     __tablename__ = "knowledge_bases"

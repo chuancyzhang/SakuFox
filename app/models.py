@@ -90,3 +90,7 @@ class UpdateKnowledgeBaseRequest(BaseModel):
 
 class MountKnowledgeBasesRequest(BaseModel):
     knowledge_bases: list[str]
+
+
+class MountSkillsRequest(BaseModel):
+    skills: list[str]

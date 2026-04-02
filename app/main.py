@@ -32,7 +32,8 @@ from app.models import (
     RenameSandboxRequest,
     CreateKnowledgeBaseRequest,
     UpdateKnowledgeBaseRequest,
-    MountKnowledgeBasesRequest
+    MountKnowledgeBasesRequest,
+    MountSkillsRequest,
 )
 from app.python_sandbox import run_python_pipeline
 from app.skills import list_skills, save_skill_from_proposal
@@ -60,6 +61,42 @@ def index() -> FileResponse:
 @app.get("/dashboard")
 def dashboard() -> FileResponse:
     return FileResponse(str(web_dir / "dashboard.html"))
+
+
+def _dedupe_keep_order(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    output: list[str] = []
+    for value in values:
+        normalized = str(value).strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        output.append(normalized)
+    return output
+
+
+def _collect_business_knowledge(sandbox: dict, sandbox_id: str) -> list[str]:
+    knowledge_items: list[str] = []
+
+    for kb_id in sandbox.get("knowledge_bases", []):
+        kb = store.get_knowledge_base(kb_id)
+        if kb and kb.get("content"):
+            knowledge_items.append(f"[{kb.get('name')}]: {kb.get('content')}")
+
+    knowledge_items.extend(store.get_business_knowledge(sandbox_id))
+
+    for skill_id in sandbox.get("mounted_skills", []):
+        skill = store.skills.get(skill_id)
+        if not skill:
+            continue
+        skill_name = skill.get("name") or skill_id
+        knowledge_lines = ((skill.get("layers") or {}).get("knowledge") or [])
+        for line in knowledge_lines:
+            text = str(line).strip()
+            if text:
+                knowledge_items.append(f"[{skill_name}]: {text}")
+
+    return _dedupe_keep_order(knowledge_items)
 
 
 # ── Auth ──────────────────────────────────────────────────────────────
@@ -146,16 +183,8 @@ def iterate(req: IterateRequest, user: User = Depends(get_current_user)):
 
     iteration_history = store.get_iteration_history(user.user_id, session_id)
     
-    # Merge global knowledge bases and sandbox-specific business knowledge
-    business_knowledge = []
-    kb_ids = sandbox.get("knowledge_bases", [])
-    for kb_id in kb_ids:
-        kb = store.get_knowledge_base(kb_id)
-        if kb and kb.get("content"):
-            business_knowledge.append(f"[{kb.get('name')}]: {kb.get('content')}")
-            
-    # Append local business knowledge
-    business_knowledge.extend(store.get_business_knowledge(req.sandbox_id))
+    # Merge sandbox knowledge sources into a single context payload.
+    business_knowledge = _collect_business_knowledge(sandbox, req.sandbox_id)
 
     def stream_generator():
         try:
@@ -729,12 +758,12 @@ def _resolve_selected_tables(requested_tables: list[str] | None, sandbox: dict, 
         return allowed_sandbox_tables[:max_selected_tables]
     normalized: list[str] = []
     for table in requested_tables:
-        t = str(table).strip()
-        if t and t not in normalized:
-            normalized.append(t)
+        table_name = str(table).strip()
+        if table_name and table_name not in normalized:
+            normalized.append(table_name)
     if len(normalized) > max_selected_tables:
         raise HTTPException(status_code=400, detail=t("error_max_tables", max=max_selected_tables, default=f"最多可选择 {max_selected_tables} 张表"))
-    denied = [t for t in normalized if t not in allowed_sandbox_tables]
+    denied = [table_name for table_name in normalized if table_name not in allowed_sandbox_tables]
     if denied:
         raise HTTPException(status_code=403, detail=t("error_no_permission_tables", tables=', '.join(denied), default=f"无权选择表: {', '.join(denied)}"))
     return normalized
@@ -872,8 +901,23 @@ async def sync_knowledge_base(kb_id: str, user: User = Depends(get_current_user)
 def mount_knowledge_bases(sandbox_id: str, req: MountKnowledgeBasesRequest, user: User = Depends(get_current_user)):
     try:
         assert_sandbox_access(user, sandbox_id)
-        store.update_sandbox(sandbox_id, {"knowledge_bases": req.knowledge_bases})
-        return {"sandbox_id": sandbox_id, "knowledge_bases": req.knowledge_bases}
+        knowledge_bases = _dedupe_keep_order(req.knowledge_bases)
+        store.update_sandbox(sandbox_id, {"knowledge_bases": knowledge_bases})
+        return {"sandbox_id": sandbox_id, "knowledge_bases": knowledge_bases}
+    except (ValueError, PermissionError) as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+
+
+@app.post("/api/sandboxes/{sandbox_id}/skills")
+def mount_skills(sandbox_id: str, req: MountSkillsRequest, user: User = Depends(get_current_user)):
+    try:
+        assert_sandbox_access(user, sandbox_id)
+        skill_ids = _dedupe_keep_order(req.skills)
+        missing = [skill_id for skill_id in skill_ids if store.skills.get(skill_id) is None]
+        if missing:
+            raise HTTPException(status_code=400, detail=f"Skills not found: {', '.join(missing)}")
+        store.update_sandbox(sandbox_id, {"mounted_skills": skill_ids})
+        return {"sandbox_id": sandbox_id, "skills": skill_ids}
     except (ValueError, PermissionError) as exc:
         raise HTTPException(status_code=403, detail=str(exc))
 

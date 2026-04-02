@@ -142,6 +142,16 @@ class DatabaseStore:
 
             with self.engine.begin() as conn:
 
+                conn.execute(text("ALTER TABLE sandboxes ADD COLUMN mounted_skills JSON"))
+
+        except Exception:
+
+            pass # Already exists
+
+        try:
+
+            with self.engine.begin() as conn:
+
                 conn.execute(text("ALTER TABLE skills ADD COLUMN version INTEGER DEFAULT 1"))
 
                 conn.execute(text("ALTER TABLE skills ADD COLUMN history JSON"))
@@ -292,7 +302,11 @@ class DatabaseStore:
 
                     uploads={},
 
-                    upload_paths={}
+                    upload_paths={},
+
+                    knowledge_bases=[],
+
+                    mounted_skills=[]
 
                 )
 
@@ -303,6 +317,18 @@ class DatabaseStore:
             elif set(sb.tables) != set(tables):
 
                 sb.tables = tables
+
+                sess.commit()
+
+            elif sb.knowledge_bases is None or sb.mounted_skills is None:
+
+                if sb.knowledge_bases is None:
+
+                    sb.knowledge_bases = []
+
+                if sb.mounted_skills is None:
+
+                    sb.mounted_skills = []
 
                 sess.commit()
 
@@ -1182,7 +1208,11 @@ class DatabaseStore:
 
                 uploads={},
 
-                upload_paths={}
+                upload_paths={},
+
+                knowledge_bases=[],
+
+                mounted_skills=[]
 
             )
 
@@ -1218,7 +1248,11 @@ class DatabaseStore:
 
                     "upload_paths": sb.upload_paths or {},
 
-                    "db_connection": sb.db_config
+                    "db_connection": sb.db_config,
+
+                    "knowledge_bases": sb.knowledge_bases or [],
+
+                    "mounted_skills": sb.mounted_skills or []
 
                 })
 
