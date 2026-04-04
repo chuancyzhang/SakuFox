@@ -443,6 +443,38 @@ def _build_iteration_user_prompt(
     return "\n".join(parts)
 
 
+def _looks_like_direct_report_output(raw: str) -> bool:
+    text = raw.strip()
+    if not text:
+        return False
+    if text.startswith("{") or text.startswith("```json"):
+        return False
+    markdown_markers = (
+        "## ",
+        "# ",
+        "- ",
+        "1. ",
+        "Executive Summary",
+        "执行摘要",
+        "Key Findings",
+        "关键发现",
+        "Business Recommendations",
+        "业务建议",
+    )
+    return any(marker in text for marker in markdown_markers) and len(text) >= 80
+
+
+def _is_json_parse_failure_payload(parsed: dict) -> bool:
+    conclusions = parsed.get("conclusions", [])
+    if not isinstance(conclusions, list):
+        return False
+    for item in conclusions:
+        text = item.get("text", "") if isinstance(item, dict) else str(item)
+        if "json" in str(text).lower():
+            return True
+    return False
+
+
 
 
 
@@ -501,6 +533,22 @@ def _run_iteration_by_llm(
     # Parse the final JSON
 
     parsed = _parse_bundle_json(full_content)
+
+    if _is_json_parse_failure_payload(parsed) and _looks_like_direct_report_output(full_content):
+        yield {
+            "type": "result",
+            "data": {
+                "steps": [],
+                "tools_used": [],
+                "conclusions": [],
+                "hypotheses": [],
+                "action_items": [],
+                "explanation": t("agent_explanation_default"),
+                "final_report_outline": [],
+                "direct_report": full_content.strip(),
+            },
+        }
+        return
 
 
 
@@ -624,6 +672,14 @@ def _run_iteration_by_llm(
 
     action_items = [str(a) for a in action_items if str(a).strip()]
 
+    final_report_outline = parsed.get("final_report_outline")
+    if isinstance(final_report_outline, list):
+        normalized_report_outline = [str(item).strip() for item in final_report_outline if str(item).strip()]
+    elif isinstance(final_report_outline, str) and final_report_outline.strip():
+        normalized_report_outline = [line.strip() for line in final_report_outline.splitlines() if line.strip()]
+    else:
+        normalized_report_outline = []
+
 
 
     explanation = str(parsed.get("explanation", "")) or t("agent_explanation_default")
@@ -647,6 +703,10 @@ def _run_iteration_by_llm(
             "action_items": action_items,
 
             "explanation": explanation,
+
+            "final_report_outline": normalized_report_outline,
+
+            "direct_report": "",
 
         },
 
@@ -704,6 +764,10 @@ def _run_iteration_by_rules(message: str, sandbox: dict) -> Generator[dict, None
 
             "explanation": t("agent_explanation_mock"),
 
+            "final_report_outline": [],
+
+            "direct_report": "",
+
         },
 
     }
@@ -716,6 +780,158 @@ def _run_iteration_by_rules(message: str, sandbox: dict) -> Generator[dict, None
 
 
 
+
+
+def generate_auto_analysis_report(
+    message: str,
+    loop_rounds: list[dict],
+    business_knowledge: list[str],
+    stop_reason: str,
+    provider: str | None = None,
+    model: str | None = None,
+) -> str:
+    """Build a final business report from completed auto-analysis rounds."""
+    config = load_config()
+    selected_provider = (provider or config.llm_provider).lower()
+    if selected_provider not in {"openai", "anthropic"}:
+        return _build_fallback_auto_report(message, loop_rounds, stop_reason)
+
+    knowledge_block = "\n".join(f"- {item}" for item in business_knowledge[:30]) or "- N/A"
+    rounds_summary = _build_loop_rounds_summary(loop_rounds)
+    system_prompt = (
+        "You are a senior analytics lead. Turn multi-round SQL/Python analysis traces into a concise business report. "
+        "Do not invent evidence. If confidence is limited, say so explicitly."
+    )
+    user_prompt = (
+        f"Original request:\n{message}\n\n"
+        f"Stop reason:\n{stop_reason}\n\n"
+        f"Business knowledge:\n{knowledge_block}\n\n"
+        f"Auto-analysis rounds:\n{rounds_summary}\n\n"
+        "Write the final report in Markdown with exactly these sections:\n"
+        "## Executive Summary\n"
+        "## Key Findings\n"
+        "## Evidence And Analysis Process\n"
+        "## Charts And Data Notes\n"
+        "## Business Recommendations\n"
+        "## Remaining Validation Questions\n"
+        "Avoid code unless a very short snippet is necessary."
+    )
+    chunks = (
+        _call_openai_protocol(system_prompt=system_prompt, user_prompt=user_prompt, model=model, config=config)
+        if selected_provider == "openai"
+        else _call_anthropic_protocol(system_prompt=system_prompt, user_prompt=user_prompt, model=model, config=config)
+    )
+    content = "".join(chunks).strip()
+    return content or _build_fallback_auto_report(message, loop_rounds, stop_reason)
+
+
+def _build_loop_rounds_summary(loop_rounds: list[dict]) -> str:
+    sections: list[str] = []
+    for round_item in loop_rounds:
+        round_no = round_item.get("round", "?")
+        result = round_item.get("result") or {}
+        exec_result = round_item.get("execution") or {}
+        rows = exec_result.get("rows") or []
+        charts = exec_result.get("chart_specs") or []
+        step_bits = []
+        for step in (result.get("steps") or []):
+            tool = str(step.get("tool", "")).strip()
+            code = str(step.get("code", "")).strip().replace("\n", " ")
+            if tool and code:
+                step_bits.append(f"{tool}: {code[:180]}")
+        conclusion_bits = []
+        for conclusion in (result.get("conclusions") or [])[:5]:
+            if isinstance(conclusion, dict):
+                conclusion_bits.append(
+                    f"{conclusion.get('text', '')} (confidence={conclusion.get('confidence', 0.5)})"
+                )
+            else:
+                conclusion_bits.append(str(conclusion))
+        action_bits = [str(item) for item in (result.get("action_items") or [])[:5]]
+        sections.append(
+            "\n".join(
+                [
+                    f"Round {round_no}",
+                    f"Focus: {round_item.get('prompt', '')}",
+                    f"Tools: {', '.join(result.get('tools_used', [])) or 'none'}",
+                    f"Steps: {' | '.join(step_bits) or 'none'}",
+                    f"Conclusions: {' | '.join(conclusion_bits) or 'none'}",
+                    f"Actions: {' | '.join(action_bits) or 'none'}",
+                    f"Rows: {len(rows)}",
+                    f"Charts: {len(charts)}",
+                    f"Error: {round_item.get('error') or exec_result.get('error') or 'none'}",
+                ]
+            )
+        )
+    return "\n\n".join(sections) or "No completed rounds."
+
+
+def _build_fallback_auto_report(message: str, loop_rounds: list[dict], stop_reason: str) -> str:
+    findings: list[str] = []
+    suggestions: list[str] = []
+    pending: list[str] = []
+    evidence: list[str] = []
+    chart_count = 0
+    for round_item in loop_rounds:
+        result = round_item.get("result") or {}
+        exec_result = round_item.get("execution") or {}
+        chart_count += len(exec_result.get("chart_specs") or [])
+        for conclusion in (result.get("conclusions") or [])[:2]:
+            if isinstance(conclusion, dict):
+                text = str(conclusion.get("text", "")).strip()
+                confidence = conclusion.get("confidence", 0.5)
+                if text:
+                    findings.append(f"- {text} (confidence {int(float(confidence) * 100)}%)")
+            else:
+                text = str(conclusion).strip()
+                if text:
+                    findings.append(f"- {text}")
+        for action in (result.get("action_items") or [])[:2]:
+            text = str(action).strip()
+            if text:
+                suggestions.append(f"- {text}")
+        for hypothesis in (result.get("hypotheses") or [])[:2]:
+            text = hypothesis.get("text", "") if isinstance(hypothesis, dict) else str(hypothesis)
+            text = str(text).strip()
+            if text:
+                pending.append(f"- {text}")
+        rows_count = len(exec_result.get("rows") or [])
+        evidence.append(
+            f"- Round {round_item.get('round', '?')} executed {len(result.get('steps') or [])} steps and produced {rows_count} result rows"
+        )
+
+    if not findings:
+        findings.append("- The auto-analysis did not produce stable conclusions yet. Validate against raw data before acting.")
+    if not suggestions:
+        suggestions.append("- Add tighter business constraints or a time range, then rerun one-click analysis.")
+    if not pending:
+        pending.append("- No additional open validation questions.")
+
+    return (
+        "## Executive Summary\n"
+        f"- Question: {message}\n"
+        f"- Stop Reason: {stop_reason}\n"
+        f"- Completed Rounds: {len(loop_rounds)}\n\n"
+        "## Key Findings\n"
+        f"{chr(10).join(findings)}\n\n"
+        "## Evidence And Analysis Process\n"
+        f"{chr(10).join(evidence) if evidence else '- No execution trace available.'}\n\n"
+        "## Charts And Data Notes\n"
+        f"- Generated {chart_count} charts.\n\n"
+        "## Business Recommendations\n"
+        f"{chr(10).join(suggestions)}\n\n"
+        "## Remaining Validation Questions\n"
+        f"{chr(10).join(pending)}"
+    )
+
+
+def _is_incomplete_stream_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return (
+        "incomplete chunked read" in text
+        or "peer closed connection" in text
+        or "incomplete message body" in text
+    )
 
 
 def _call_openai_protocol(system_prompt: str, user_prompt: str, model: str | None, config: AppConfig) -> Generator[str, None, None]:
@@ -756,41 +972,47 @@ def _call_openai_protocol(system_prompt: str, user_prompt: str, model: str | Non
 
 
 
-    with httpx.Client(timeout=60.0) as client:
+    received_any = False
+    try:
+        with httpx.Client(timeout=60.0) as client:
 
-        with client.stream("POST", url, headers=headers, json=payload) as response:
+            with client.stream("POST", url, headers=headers, json=payload) as response:
 
-            if response.status_code >= 400:
+                if response.status_code >= 400:
 
-                raise RuntimeError(f"OpenAI 协议请求失败: {response.status_code}")
+                    raise RuntimeError(f"OpenAI 协议请求失败: {response.status_code}")
 
 
 
-            for line in response.iter_lines():
+                for line in response.iter_lines():
 
-                if line.startswith("data: "):
+                    if line.startswith("data: "):
 
-                    data_str = line[6:].strip()
+                        data_str = line[6:].strip()
 
-                    if data_str == "[DONE]":
+                        if data_str == "[DONE]":
 
-                        break
+                            break
 
-                    try:
+                        try:
 
-                        data = json.loads(data_str)
+                            data = json.loads(data_str)
 
-                        delta = data.get("choices", [{}])[0].get("delta", {})
+                            delta = data.get("choices", [{}])[0].get("delta", {})
 
-                        content = delta.get("content", "")
+                            content = delta.get("content", "")
 
-                        if content:
+                            if content:
+                                received_any = True
+                                yield content
 
-                            yield content
+                        except json.JSONDecodeError:
 
-                    except json.JSONDecodeError:
-
-                        continue
+                            continue
+    except Exception as exc:
+        if received_any and _is_incomplete_stream_error(exc):
+            return
+        raise
 
 
 
@@ -838,39 +1060,47 @@ def _call_anthropic_protocol(system_prompt: str, user_prompt: str, model: str | 
 
 
 
-    with httpx.Client(timeout=60.0) as client:
+    received_any = False
+    try:
+        with httpx.Client(timeout=60.0) as client:
 
-        with client.stream("POST", url, headers=headers, json=payload) as response:
+            with client.stream("POST", url, headers=headers, json=payload) as response:
 
-            if response.status_code >= 400:
+                if response.status_code >= 400:
 
-                raise RuntimeError(f"Anthropic 协议请求失败: {response.status_code}")
+                    raise RuntimeError(f"Anthropic 协议请求失败: {response.status_code}")
 
 
 
-            for line in response.iter_lines():
+                for line in response.iter_lines():
 
-                if line.startswith("data: "):
+                    if line.startswith("data: "):
 
-                    data_str = line[6:].strip()
+                        data_str = line[6:].strip()
 
-                    try:
+                        try:
 
-                        data = json.loads(data_str)
+                            data = json.loads(data_str)
 
-                        type_ = data.get("type")
+                            type_ = data.get("type")
 
-                        if type_ == "content_block_delta":
+                            if type_ == "content_block_delta":
 
-                            delta = data.get("delta", {})
+                                delta = data.get("delta", {})
 
-                            if delta.get("type") == "text_delta":
+                                if delta.get("type") == "text_delta":
+                                    text = delta.get("text", "")
+                                    if text:
+                                        received_any = True
+                                        yield text
 
-                                yield delta.get("text", "")
+                        except json.JSONDecodeError:
 
-                    except json.JSONDecodeError:
-
-                        continue
+                            continue
+    except Exception as exc:
+        if received_any and _is_incomplete_stream_error(exc):
+            return
+        raise
 
 
 
@@ -1224,6 +1454,15 @@ Return ONLY JSON.
 
 """
 
+    steps = analysis_result.get('steps', [])
+    if not steps and analysis_result.get("loop_rounds"):
+        steps = []
+        for round_payload in analysis_result.get("loop_rounds", []):
+            for step in ((round_payload.get("result") or {}).get("steps") or []):
+                if isinstance(step, dict):
+                    steps.append(step)
+    report_text = str(analysis_result.get("final_report_md", "")).strip()
+
     user_prompt = user_prompt_template.format(
 
         message=message,
@@ -1232,9 +1471,9 @@ Return ONLY JSON.
 
         conclusions=json.dumps(analysis_result.get('conclusions', []), ensure_ascii=False),
 
-        steps=json.dumps(analysis_result.get('steps', []), ensure_ascii=False),
+        steps=json.dumps(steps, ensure_ascii=False),
 
-        explanation=analysis_result.get('explanation', '')
+        explanation=(analysis_result.get('explanation', '') or "") + (f"\n\nFinal Report:\n{report_text}" if report_text else "")
 
     )
 

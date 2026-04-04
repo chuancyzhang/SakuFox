@@ -162,6 +162,22 @@ class DatabaseStore:
 
             pass # Already exists
 
+        for stmt in (
+            "ALTER TABLE iterations ADD COLUMN mode VARCHAR(50) DEFAULT 'manual'",
+            "ALTER TABLE iterations ADD COLUMN loop_rounds JSON",
+            "ALTER TABLE iterations ADD COLUMN final_report_md TEXT",
+            "ALTER TABLE iterations ADD COLUMN report_meta JSON",
+            "ALTER TABLE proposals ADD COLUMN mode VARCHAR(50) DEFAULT 'manual'",
+            "ALTER TABLE proposals ADD COLUMN loop_rounds JSON",
+            "ALTER TABLE proposals ADD COLUMN final_report_md TEXT",
+            "ALTER TABLE proposals ADD COLUMN report_meta JSON",
+        ):
+            try:
+                with self.engine.begin() as conn:
+                    conn.execute(text(stmt))
+            except Exception:
+                pass # Already exists
+
 
 
     def _seed_sandbox_data(self) -> None:
@@ -470,6 +486,8 @@ class DatabaseStore:
 
             "message": it.message,
 
+            "mode": it.mode or "manual",
+
             "steps": it.steps,
 
             "conclusions": it.conclusions,
@@ -483,6 +501,12 @@ class DatabaseStore:
             "result_rows": it.result_rows,
 
             "chart_specs": it.chart_specs,
+
+            "loop_rounds": it.loop_rounds or [],
+
+            "final_report_md": it.final_report_md or "",
+
+            "report_meta": it.report_meta or {},
 
             "created_at": it.created_at
 
@@ -558,6 +582,8 @@ class DatabaseStore:
 
                 message=iteration.get("message", ""),
 
+                mode=iteration.get("mode", "manual"),
+
                 steps=iteration.get("steps", []),
 
                 conclusions=iteration.get("conclusions", []),
@@ -571,6 +597,12 @@ class DatabaseStore:
                 result_rows=iteration.get("result_rows", []),
 
                 chart_specs=iteration.get("chart_specs", []),
+
+                loop_rounds=iteration.get("loop_rounds", []),
+
+                final_report_md=iteration.get("final_report_md", ""),
+
+                report_meta=iteration.get("report_meta", {}),
 
                 created_at=created_at
 
@@ -678,6 +710,8 @@ class DatabaseStore:
 
                 explanation=data.get("explanation"),
 
+                mode=data.get("mode", "manual"),
+
                 tables=data.get("tables"),
 
                 status=data.get("status", "pending"),
@@ -689,6 +723,12 @@ class DatabaseStore:
                 selected_tables=data.get("selected_tables"),
 
                 session_patches=data.get("session_patches"),
+
+                loop_rounds=data.get("loop_rounds"),
+
+                final_report_md=data.get("final_report_md"),
+
+                report_meta=data.get("report_meta"),
 
                 created_at=datetime.now(timezone.utc).isoformat()
 
@@ -748,11 +788,21 @@ class DatabaseStore:
 
                     "chart_specs": p.chart_specs,
 
+                    "mode": p.mode or "manual",
+
                     "tables": p.tables or [],
 
                     "steps": p.steps or [],
 
                     "explanation": p.explanation or "",
+
+                    "loop_rounds": p.loop_rounds or [],
+
+                    "final_report_md": p.final_report_md or "",
+
+                    "report_meta": p.report_meta or {},
+
+                    "session_patches": p.session_patches or [],
 
                     "sql": "", # Compatibility
 

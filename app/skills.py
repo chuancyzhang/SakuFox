@@ -24,8 +24,13 @@ def save_skill_from_proposal(
     if proposal["status"] != "executed":
         raise ValueError(t("error_not_executed_proposal", default="仅可保存已执行提案"))
 
-    inherited_tables = filter_tables_by_user(user, proposal["tables"])
-    steps = proposal.get("steps", [])
+    inherited_tables = filter_tables_by_user(user, proposal["tables"])
+    steps = proposal.get("steps", [])
+    if not steps:
+        for round_payload in proposal.get("loop_rounds", []):
+            for step in ((round_payload.get("result") or {}).get("steps") or []):
+                if isinstance(step, dict):
+                    steps.append(step)
 
     # ── Layer 1: Knowledge (business rules / patches) ──────────────────
     session_knowledge: list[str] = []

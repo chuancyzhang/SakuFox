@@ -780,6 +780,16 @@ async function switchSession(targetSessionId) {
 
       if (iter.message) addUserMessage(iter.message);
 
+      if (iter.mode === "auto_analysis") {
+
+        const wrapper = createAiMessageContainer();
+
+        replayAutoAnalysisIteration(iter, wrapper);
+
+        return;
+
+      }
+
 
 
       // 2. Render the AI analysis card (full replay)
@@ -1225,6 +1235,189 @@ function renderIterationResult(result, wrapper, accumulatedThought, chartContain
 }
 
 
+function renderMarkdownContent(markdown) {
+
+  if (!markdown) return "";
+
+  if (window.marked && typeof window.marked.parse === "function") {
+
+    return marked.parse(markdown);
+
+  }
+
+  return `<pre style="white-space:pre-wrap;">${escapeHtml(markdown)}</pre>`;
+
+}
+
+
+function renderAutoAnalysisCard(wrapper, state) {
+
+  const chartRefs = [];
+
+  const roundsHtml = (state.rounds || []).map((round) => {
+
+    const result = round.result || {};
+
+    const execution = round.execution || {};
+
+    const conclusions = (result.conclusions || []).map((item) => {
+
+      const text = typeof item === "object" ? item.text : item;
+
+      const confidence = typeof item === "object" ? item.confidence : null;
+
+      const suffix = confidence === null || confidence === undefined
+
+        ? ""
+
+        : ` <span style="font-size:11px;color:var(--text-muted)">(${Math.round(confidence * 100)}%)</span>`;
+
+      return `<li>${escapeHtml(text || "")}${suffix}</li>`;
+
+    }).join("");
+
+    const actions = (result.action_items || result.actionItems || []).map((item) => `<li>${escapeHtml(item)}</li>`).join("");
+
+    const rows = execution.rows || [];
+
+    const charts = execution.chart_specs || [];
+
+    const chartsHtml = charts.map((spec, idx) => {
+
+      const id = `auto_chart_${Date.now()}_${round.round}_${idx}_${Math.random().toString(16).slice(2, 8)}`;
+
+      chartRefs.push({ id, spec });
+
+      return `<div id="${id}" style="height:300px;width:100%;margin:12px 0;"></div>`;
+
+    }).join("");
+
+    const stepsHtml = (result.steps || []).map((step, idx) => `
+
+      <details class="code-details" style="margin-top:8px;">
+
+        <summary style="font-size:12px;font-weight:600;">${escapeHtml(step.tool || "step")} ${idx + 1}</summary>
+
+        <pre><code>${escapeHtml(step.code || "")}</code></pre>
+
+      </details>
+
+    `).join("");
+
+    const errorHtml = round.error || execution.error
+
+      ? `<div style="margin-top:10px;color:#ef4444;font-size:13px;"><i class="fa-solid fa-circle-exclamation"></i> ${escapeHtml(round.error || execution.error)}</div>`
+
+      : "";
+
+    const thoughtHtml = round.thought
+
+      ? `<details style="margin-top:10px;"><summary style="cursor:pointer;font-size:12px;">${i18n.t("thought_process") || "思考过程"}</summary><div style="white-space:pre-wrap;font-size:12px;color:var(--text-muted);margin-top:8px;">${escapeHtml(round.thought)}</div></details>`
+
+      : "";
+
+    return `
+
+      <div style="margin-top:16px;padding:14px;border:1px solid var(--border);border-radius:10px;background:#fff;">
+
+        <div style="display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:10px;">
+
+          <div style="font-weight:600;color:var(--text-main);">第 ${round.round} 轮</div>
+
+          <div style="font-size:12px;color:var(--text-muted);">${escapeHtml((result.tools_used || []).join(", ") || "无工具调用")}</div>
+
+        </div>
+
+        ${thoughtHtml}
+
+        ${conclusions ? `<div style="margin-top:10px;"><div style="font-weight:600;font-size:13px;margin-bottom:6px;">关键结论</div><ul style="padding-left:18px;margin:0;">${conclusions}</ul></div>` : ""}
+
+        ${actions ? `<div style="margin-top:10px;"><div style="font-weight:600;font-size:13px;margin-bottom:6px;">行动建议</div><ul style="padding-left:18px;margin:0;">${actions}</ul></div>` : ""}
+
+        ${chartsHtml}
+
+        ${rows.length ? `<details style="margin-top:10px;"><summary style="cursor:pointer;font-size:12px;">数据预览 (${rows.length} ${i18n.t("rows") || "rows"})</summary>${jsonToTable(rows.slice(0, 50))}</details>` : ""}
+
+        ${stepsHtml}
+
+        ${errorHtml}
+
+      </div>
+
+    `;
+
+  }).join("");
+
+  const reportSection = state.report
+
+    ? `<div style="margin-top:16px;padding:16px;border:1px solid #dbeafe;border-radius:12px;background:#f8fbff;">
+
+        <div style="font-weight:700;color:#1d4ed8;margin-bottom:10px;">最终分析报告</div>
+
+        <div class="markdown-body">${renderMarkdownContent(state.report)}</div>
+
+      </div>`
+
+    : "";
+
+  const statusLine = `
+
+    <div style="font-size:13px;color:var(--text-muted);margin-bottom:10px;">
+
+      ${escapeHtml(state.status || "正在分析")} ${state.stopReason ? `| 停止原因: ${escapeHtml(state.stopReason)}` : ""}
+
+    </div>
+
+  `;
+
+  updateAiCard(wrapper, state.title || "一键分析", `${statusLine}${reportSection}${roundsHtml}`, state.liveThought || null);
+
+  if (chartRefs.length > 0) {
+
+    setTimeout(() => {
+
+      chartRefs.forEach(({ id, spec }) => {
+
+        const dom = document.getElementById(id);
+
+        if (dom && spec) {
+
+          const chart = echarts.init(dom);
+
+          chart.setOption(spec);
+
+        }
+
+      });
+
+    }, 50);
+
+  }
+
+}
+
+
+function replayAutoAnalysisIteration(iter, wrapper) {
+
+  renderAutoAnalysisCard(wrapper, {
+
+    title: "一键分析",
+
+    status: `已完成 ${((iter.report_meta || {}).rounds_completed || (iter.loop_rounds || []).length)} 轮`,
+
+    stopReason: (iter.report_meta || {}).stop_reason || "",
+
+    report: iter.final_report_md || "",
+
+    rounds: iter.loop_rounds || [],
+
+    liveThought: "",
+
+  });
+
+}
+
+
 
 async function handleSend(hypothesisId = null) {
 
@@ -1521,8 +1714,223 @@ async function handleSend(hypothesisId = null) {
 }
 
 
+async function handleAutoAnalyze() {
+
+  const input = document.getElementById("questionInput");
+
+  const rawValue = input.value.trim();
+
+  if (!rawValue) return;
+
+  const isKnowledge = rawValue.startsWith(i18n.t('knowledge_prefix') || "知识:") || rawValue.startsWith("业务知识:") || rawValue.startsWith("Knowledge:");
+
+  const isFeedback = rawValue.startsWith(i18n.t('feedback_prefix') || "反馈:") || rawValue.startsWith("纠正:") || rawValue.startsWith("Feedback:");
+
+  if (isKnowledge || isFeedback || rawValue.startsWith("fix:") || rawValue.startsWith("patch:")) {
+
+    await handleSend();
+
+    return;
+
+  }
+
+  const sandboxId = sandboxSelect.value;
+
+  if (!sandboxId) {
+
+    alert(i18n.t('select_sandbox_first'));
+
+    return;
+
+  }
+
+  const welcomeCard = document.querySelector(".welcome-card");
+
+  if (welcomeCard) welcomeCard.style.display = "none";
+
+  addUserMessage(rawValue);
+
+  input.value = "";
+
+  const directive = parseProviderDirective(rawValue);
+
+  const checkedFiles = Array.from(document.querySelectorAll(".uploaded-file-checkbox:checked"))
+
+    .map(cb => cb.value);
+
+  const checkedTables = Array.from(document.querySelectorAll(".db-table-checkbox-sidebar:checked"))
+
+    .map(cb => cb.value);
+
+  const reqBody = {
+
+    sandbox_id: sandboxId,
+
+    message: directive.message || rawValue,
+
+    session_id: sessionId || null,
+
+    selected_files: checkedFiles,
+
+    selected_tables: checkedTables.length > 0 ? checkedTables : null,
+
+    max_rounds: 100,
+
+    trace_mode: "full"
+
+  };
+
+  if (directive.provider) reqBody.provider = directive.provider;
+
+  if (directive.model) reqBody.model = directive.model;
+
+  const wrapper = createAiMessageContainer();
+
+  const state = {
+
+    title: "一键分析",
+
+    status: "准备开始自动分析",
+
+    stopReason: "",
+
+    report: "",
+
+    rounds: [],
+
+    liveThought: ""
+
+  };
+
+  renderAutoAnalysisCard(wrapper, state);
+
+  try {
+
+    const token = localStorage.getItem("token");
+
+    const headers = { "Content-Type": "application/json" };
+
+    if (token) headers["Authorization"] = `Bearer ${token}`;
+
+    const response = await fetch("/api/chat/auto-analyze", {
+
+      method: "POST",
+
+      headers,
+
+      body: JSON.stringify(reqBody),
+
+    });
+
+    if (!response.ok) throw new Error((i18n.t("request_failed") || "请求失败") + `: ${response.status}`);
+
+    const reader = response.body.getReader();
+
+    const decoder = new TextDecoder();
+
+    let buffer = "";
+
+    while (true) {
+
+      const { done, value } = await reader.read();
+
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+
+      const lines = buffer.split("\n");
+
+      buffer = lines.pop();
+
+      for (const line of lines) {
+
+        if (!line.trim()) continue;
+
+        try {
+
+          const payload = JSON.parse(line);
+
+          if (payload.type === "loop_status") {
+
+            const data = payload.data || {};
+
+            const phase = data.phase === "planning" ? "规划中" : "思考中";
+
+            state.status = `第 ${data.round || 0} 轮 ${phase}`;
+
+            if (data.phase === "thinking") state.liveThought = data.message || "";
+
+            renderAutoAnalysisCard(wrapper, state);
+
+          } else if (payload.type === "loop_round") {
+
+            const data = payload.data || {};
+
+            state.rounds[data.round - 1] = data;
+
+            state.liveThought = "";
+
+            state.status = `已完成 ${state.rounds.filter(Boolean).length} 轮`;
+
+            renderAutoAnalysisCard(wrapper, state);
+
+          } else if (payload.type === "report") {
+
+            const data = payload.data || {};
+
+            state.report = data.markdown || "";
+
+            state.stopReason = data.stop_reason || "";
+
+            state.status = `正在整理最终报告`;
+
+            renderAutoAnalysisCard(wrapper, state);
+
+          } else if (payload.type === "analysis_complete") {
+
+            const data = payload.data || {};
+
+            sessionId = data.session_id || sessionId;
+
+            lastProposalId = data.proposal_id || lastProposalId;
+
+            state.stopReason = data.stop_reason || state.stopReason;
+
+            state.status = `已完成 ${data.rounds_completed || state.rounds.length} 轮`;
+
+            renderAutoAnalysisCard(wrapper, state);
+
+            refreshSessions();
+
+          } else if (payload.type === "error") {
+
+            updateAiCard(wrapper, i18n.t("error_occurred"), `<div style="color: #ef4444">${escapeHtml(payload.message)}</div>`, state.liveThought);
+
+          }
+
+        } catch (e) {
+
+          console.error("JSON parse error", e, line);
+
+        }
+
+      }
+
+    }
+
+  } catch (e) {
+
+    updateAiCard(wrapper, i18n.t("request_failed") || "请求失败", `<div style="color: #ef4444">${escapeHtml(e.message)}</div>`);
+
+  }
+
+}
+
+
 
 document.getElementById("sendBtn").onclick = () => handleSend();
+
+document.getElementById("autoAnalyzeBtn").onclick = () => handleAutoAnalyze();
 
 
 

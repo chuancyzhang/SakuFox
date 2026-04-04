@@ -15,6 +15,7 @@
   "welcome_title": "Start Data Exploration",
   "welcome_desc": "Enter your requirements, AI will pull data, analyze, and output conclusions.<br />Iterate by adding logic or following hypotheses.",
   "input_placeholder": "Enter requirements or knowledge (prefix Knowledge: )",
+  "one_click_analyze": "One-Click Analyze",
   "send": "Send",
   "save_skill": "Save Skill",
   "extract_skill": "Extract Skill from Chat",

@@ -19,6 +19,12 @@ class IterateRequest(BaseModel):
     hypothesis_id: str | None = None  # pick a hypothesis from previous iteration
 
 
+class AutoAnalyzeRequest(IterateRequest):
+    """Run one-click autonomous multi-round analysis until the model stops using tools."""
+    max_rounds: int = Field(default=100, ge=1, le=100)
+    trace_mode: str = Field(default="full", pattern="^full$")
+
+
 class FeedbackRequest(BaseModel):
     """User feedback or business knowledge supplement."""
     sandbox_id: str

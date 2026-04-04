@@ -11,7 +11,12 @@ from fastapi import Request
 
 from app.i18n import set_lang, t
 
-from app.agent import run_analysis_iteration, generate_data_insight, generate_skill_proposal
+from app.agent import (
+    run_analysis_iteration,
+    generate_auto_analysis_report,
+    generate_data_insight,
+    generate_skill_proposal,
+)
 from app.auth import get_current_user, login_with_ldap, login_with_oauth
 from app.authorization import (
     assert_sandbox_access,
@@ -22,6 +27,7 @@ from app.config import load_config, MAX_SELECTED_TABLES
 from app.db_connections import DbConnectionConfig, execute_external_sql, get_engine, test_connection, get_table_names
 from app.models import (
     FeedbackRequest,
+    AutoAnalyzeRequest,
     IterateRequest,
     LoginRequest,
     SaveSkillRequest,
@@ -75,7 +81,7 @@ def _dedupe_keep_order(values: list[str]) -> list[str]:
     return output
 
 
-def _collect_business_knowledge(sandbox: dict, sandbox_id: str) -> list[str]:
+def _collect_business_knowledge(sandbox: dict, sandbox_id: str, session_patches: list[str] | None = None) -> list[str]:
     knowledge_items: list[str] = []
 
     for kb_id in sandbox.get("knowledge_bases", []):
@@ -96,7 +102,178 @@ def _collect_business_knowledge(sandbox: dict, sandbox_id: str) -> list[str]:
             if text:
                 knowledge_items.append(f"[{skill_name}]: {text}")
 
+    for patch in session_patches or []:
+        text = str(patch).strip()
+        if text:
+            knowledge_items.append(f"[Session Patch]: {text}")
+
     return _dedupe_keep_order(knowledge_items)
+
+
+def _build_iteration_message(
+    original_message: str,
+    round_index: int,
+    previous_round: dict | None = None,
+) -> str:
+    if round_index <= 1 or previous_round is None:
+        return (
+            f"{original_message}\n\n"
+            "You are in one-click auto-analysis mode. If you still need SQL or Python tools, output steps. "
+            "If no more tool use is needed, output empty steps and provide final conclusions, action items, and a report outline."
+        )
+
+    result = previous_round.get("result") or {}
+    execution = previous_round.get("execution") or {}
+    conclusions = "; ".join(
+        str(item.get("text", "")).strip()
+        for item in (result.get("conclusions") or [])[:5]
+        if isinstance(item, dict) and str(item.get("text", "")).strip()
+    ) or "none"
+    actions = "; ".join(str(item).strip() for item in (result.get("action_items") or [])[:5] if str(item).strip()) or "none"
+    rows_count = len(execution.get("rows") or [])
+    charts_count = len(execution.get("chart_specs") or [])
+    error_text = execution.get("error") or previous_round.get("error") or "none"
+    return (
+        f"{original_message}\n\n"
+        f"This is auto-analysis round {round_index}. Continue from the previous round.\n"
+        f"Previous conclusions: {conclusions}\n"
+        f"Previous actions: {actions}\n"
+        f"Previous result rows: {rows_count}; charts: {charts_count}; error: {error_text}\n"
+        "If more tool calls are needed, keep outputting SQL/Python steps. If analysis is sufficient, output empty steps and finalize the conclusions."
+    )
+
+
+def _build_auto_history_entry(round_payload: dict) -> dict:
+    result = round_payload.get("result") or {}
+    execution = round_payload.get("execution") or {}
+    rows_count = len(execution.get("rows") or [])
+    return {
+        "iteration_id": f"auto_round_{round_payload.get('round', '?')}",
+        "message": f"Auto round {round_payload.get('round', '?')} rows={rows_count}",
+        "conclusions": result.get("conclusions", []),
+        "hypotheses": result.get("hypotheses", []),
+    }
+
+
+def _merge_tools_used(loop_rounds: list[dict]) -> list[str]:
+    tools: list[str] = []
+    for round_payload in loop_rounds:
+        for tool in (round_payload.get("result") or {}).get("tools_used", []):
+            if tool not in tools:
+                tools.append(tool)
+    return tools
+
+
+def _flatten_loop_steps(loop_rounds: list[dict]) -> list[dict]:
+    steps: list[dict] = []
+    for round_payload in loop_rounds:
+        for step in (round_payload.get("result") or {}).get("steps", []):
+            if isinstance(step, dict):
+                steps.append({"tool": step.get("tool", ""), "code": step.get("code", "")})
+    return steps
+
+
+def _merge_structured_items(loop_rounds: list[dict], key: str, unique_key: str | None = None) -> list:
+    output: list = []
+    seen: set[str] = set()
+    for round_payload in loop_rounds:
+        for item in (round_payload.get("result") or {}).get(key, []):
+            if unique_key and isinstance(item, dict):
+                marker = str(item.get(unique_key, "")).strip()
+            else:
+                marker = json.dumps(item, ensure_ascii=False, sort_keys=True) if isinstance(item, (dict, list)) else str(item)
+            if marker and marker not in seen:
+                seen.add(marker)
+                output.append(item)
+    return output
+
+
+def _collect_all_charts(loop_rounds: list[dict]) -> list[dict]:
+    charts: list[dict] = []
+    for round_payload in loop_rounds:
+        charts.extend((round_payload.get("execution") or {}).get("chart_specs", []))
+    return charts
+
+
+def _get_last_result_rows(loop_rounds: list[dict]) -> list[dict]:
+    for round_payload in reversed(loop_rounds):
+        rows = (round_payload.get("execution") or {}).get("rows", [])
+        if rows:
+            return rows
+    return []
+
+
+def _is_json_parse_failure_result(result_data: dict) -> bool:
+    if result_data.get("steps"):
+        return False
+    conclusions = result_data.get("conclusions") or []
+    for item in conclusions:
+        text = item.get("text", "") if isinstance(item, dict) else str(item)
+        if "json" in str(text).lower():
+            return True
+    return False
+
+
+def _build_auto_iteration_payload(
+    message: str,
+    session_id: str,
+    sandbox_id: str,
+    selected_tables: list[str],
+    session: dict,
+    loop_rounds: list[dict],
+    report_md: str,
+    stop_reason: str,
+    max_rounds: int,
+) -> dict:
+    max_rounds_hit = stop_reason == "max_rounds_reached"
+    return {
+        "mode": "auto_analysis",
+        "message": message,
+        "sandbox_id": sandbox_id,
+        "steps": _flatten_loop_steps(loop_rounds),
+        "conclusions": _merge_structured_items(loop_rounds, "conclusions", unique_key="text"),
+        "hypotheses": _merge_structured_items(loop_rounds, "hypotheses", unique_key="text"),
+        "action_items": [str(item) for item in _merge_structured_items(loop_rounds, "action_items")],
+        "tools_used": _merge_tools_used(loop_rounds),
+        "result_rows": _get_last_result_rows(loop_rounds)[:100],
+        "chart_specs": _collect_all_charts(loop_rounds),
+        "loop_rounds": loop_rounds,
+        "final_report_md": report_md,
+        "report_meta": {
+            "stop_reason": stop_reason,
+            "rounds_completed": len(loop_rounds),
+            "max_rounds_hit": max_rounds_hit,
+        },
+        "session_id": session_id,
+        "session_patches": list(session.get("patches", [])),
+    }
+
+
+def _execute_analysis_steps(
+    result_data: dict,
+    sandbox: dict,
+    selected_tables: list[str],
+    selected_files: list[str] | None,
+    sandbox_id: str,
+) -> dict:
+    all_uploads = sandbox.get("uploads", {})
+    all_upload_paths = sandbox.get("upload_paths", {})
+    if selected_files is not None:
+        allowed_uploads = {k: v for k, v in all_uploads.items() if k in selected_files}
+        allowed_upload_paths = {k: v for k, v in all_upload_paths.items() if k in selected_files}
+    else:
+        allowed_uploads = all_uploads
+        allowed_upload_paths = all_upload_paths
+
+    exec_result = _auto_execute(
+        result_data=result_data,
+        allowed_tables=selected_tables,
+        upload_rows=allowed_uploads,
+        upload_paths=allowed_upload_paths,
+        sandbox_id=sandbox_id,
+    )
+    from app.utils import sanitize_for_json
+    return sanitize_for_json(exec_result)
 
 
 # ── Auth ──────────────────────────────────────────────────────────────
@@ -184,7 +361,7 @@ def iterate(req: IterateRequest, user: User = Depends(get_current_user)):
     iteration_history = store.get_iteration_history(user.user_id, session_id)
     
     # Merge sandbox knowledge sources into a single context payload.
-    business_knowledge = _collect_business_knowledge(sandbox, req.sandbox_id)
+    business_knowledge = _collect_business_knowledge(sandbox, req.sandbox_id, list(session.get("patches", [])))
 
     def stream_generator():
         try:
@@ -203,25 +380,13 @@ def iterate(req: IterateRequest, user: User = Depends(get_current_user)):
 
             # Auto-execute: run SQL + Python if present
             if result_data:
-                all_uploads = sandbox.get("uploads", {})
-                all_upload_paths = sandbox.get("upload_paths", {})
-                if req.selected_files is not None:
-                    allowed_uploads = {k: v for k, v in all_uploads.items() if k in req.selected_files}
-                    allowed_upload_paths = {k: v for k, v in all_upload_paths.items() if k in req.selected_files}
-                else:
-                    allowed_uploads = all_uploads
-                    allowed_upload_paths = all_upload_paths
-
-                exec_result = _auto_execute(
+                exec_result = _execute_analysis_steps(
                     result_data=result_data,
-                    allowed_tables=selected_tables,
-                    upload_rows=allowed_uploads,
-                    upload_paths=allowed_upload_paths,
+                    sandbox=sandbox,
+                    selected_tables=selected_tables,
+                    selected_files=req.selected_files,
                     sandbox_id=req.sandbox_id,
                 )
-                # Sanitize for JSON compatibility (handles NaN/Inf)
-                from app.utils import sanitize_for_json
-                exec_result = sanitize_for_json(exec_result)
 
                 # Emit data rows
                 if exec_result["rows"]:
@@ -243,6 +408,7 @@ def iterate(req: IterateRequest, user: User = Depends(get_current_user)):
 
                 # Save iteration
                 iteration_id = store.append_iteration(user.user_id, session_id, {
+                    "mode": "manual",
                     "message": message,
                     "steps": result_data.get("steps", []),
                     "conclusions": result_data.get("conclusions", []),
@@ -251,6 +417,9 @@ def iterate(req: IterateRequest, user: User = Depends(get_current_user)):
                     "tools_used": result_data.get("tools_used", []),
                     "result_rows": exec_result["rows"][:100],  # store compact
                     "chart_specs": exec_result.get("chart_specs", []),
+                    "loop_rounds": [],
+                    "final_report_md": "",
+                    "report_meta": {},
                 })
 
                 # Also create a proposal record for skill-saving compatibility
@@ -258,6 +427,7 @@ def iterate(req: IterateRequest, user: User = Depends(get_current_user)):
                     "user_id": user.user_id,
                     "session_id": session_id,
                     "sandbox_id": req.sandbox_id,
+                    "mode": "manual",
                     "message": message,
                     "steps": result_data.get("steps", []),
                     "explanation": result_data.get("explanation", ""),
@@ -267,6 +437,9 @@ def iterate(req: IterateRequest, user: User = Depends(get_current_user)):
                     "chart_specs": exec_result.get("chart_specs", []),
                     "selected_tables": selected_tables,
                     "session_patches": list(session.get("patches", [])),
+                    "loop_rounds": [],
+                    "final_report_md": "",
+                    "report_meta": {},
                 })
 
                 # Emit final metadata
@@ -284,6 +457,233 @@ def iterate(req: IterateRequest, user: User = Depends(get_current_user)):
             yield json.dumps({"type": "error", "message": str(exc)}, ensure_ascii=False) + "\n"
         except Exception as exc:
             internal_error = t("error_internal", default="服务器内部错误")
+            yield json.dumps({"type": "error", "message": f"{internal_error}: {str(exc)}"}, ensure_ascii=False) + "\n"
+
+    return StreamingResponse(stream_generator(), media_type="application/x-ndjson")
+
+
+@app.post("/api/chat/auto-analyze")
+def auto_analyze(req: AutoAnalyzeRequest, user: User = Depends(get_current_user)):
+    """Multi-round autonomous analysis until the model stops using tools."""
+    try:
+        sandbox = assert_sandbox_access(user, req.sandbox_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+
+    config = load_config()
+    session_id, session = store.get_or_create_session(user.user_id, req.session_id)
+
+    updates = {}
+    if not session.get("title"):
+        updates["title"] = req.message[:40].strip()
+    if not session.get("sandbox_id"):
+        updates["sandbox_id"] = req.sandbox_id
+    if updates:
+        store.update_session(user.user_id, session_id, updates)
+        session.update(updates)
+
+    selected_tables = _resolve_selected_tables(
+        requested_tables=req.selected_tables,
+        sandbox=sandbox,
+        user=user,
+        max_selected_tables=config.max_selected_tables,
+    )
+    analysis_sandbox = {
+        **sandbox,
+        "tables": selected_tables,
+        "selected_files": req.selected_files or [],
+    }
+
+    message = req.message
+    historical_iterations = store.get_iteration_history(user.user_id, session_id)
+    if req.hypothesis_id:
+        for it in reversed(historical_iterations):
+            for h in it.get("hypotheses", []):
+                if isinstance(h, dict) and h.get("id") == req.hypothesis_id:
+                    prefix = t("msg_based_on_hypothesis", default="基于上轮猜想")
+                    message = f"[{prefix}: {h['text']}] {message}"
+                    break
+
+    business_knowledge = _collect_business_knowledge(sandbox, req.sandbox_id, list(session.get("patches", [])))
+
+    def stream_generator():
+        loop_rounds: list[dict] = []
+        loop_history = list(historical_iterations)
+        stop_reason = "model_stopped_using_tools"
+        report_md = ""
+        direct_report_md = ""
+        try:
+            for round_index in range(1, req.max_rounds + 1):
+                round_message = _build_iteration_message(
+                    original_message=message,
+                    round_index=round_index,
+                    previous_round=loop_rounds[-1] if loop_rounds else None,
+                )
+                yield json.dumps({
+                    "type": "loop_status",
+                    "data": {
+                        "round": round_index,
+                        "phase": "planning",
+                        "message": f"starting round {round_index}",
+                    },
+                }, ensure_ascii=False) + "\n"
+
+                accumulated_thought = ""
+                result_data = None
+                for event in run_analysis_iteration(
+                    message=round_message,
+                    sandbox=analysis_sandbox,
+                    iteration_history=loop_history,
+                    business_knowledge=business_knowledge,
+                    provider=req.provider,
+                    model=req.model,
+                ):
+                    if event.get("type") == "thought":
+                        accumulated_thought += event.get("content", "")
+                        yield json.dumps({
+                            "type": "loop_status",
+                            "data": {
+                                "round": round_index,
+                                "phase": "thinking",
+                                "message": accumulated_thought,
+                            },
+                        }, ensure_ascii=False) + "\n"
+                    elif event.get("type") == "result":
+                        result_data = event.get("data")
+
+                if result_data is None:
+                    raise RuntimeError("auto analysis round returned no result")
+
+                execution_result = {"rows": [], "tables": [], "chart_specs": [], "step_results": []}
+                has_tool_calls = bool(result_data.get("steps"))
+                direct_report_md = str(result_data.get("direct_report", "") or "").strip()
+                if has_tool_calls:
+                    execution_result = _execute_analysis_steps(
+                        result_data=result_data,
+                        sandbox=sandbox,
+                        selected_tables=selected_tables,
+                        selected_files=req.selected_files,
+                        sandbox_id=req.sandbox_id,
+                    )
+                elif _is_json_parse_failure_result(result_data):
+                    result_data = {
+                        **result_data,
+                        "conclusions": [],
+                        "hypotheses": [],
+                        "action_items": [],
+                        "explanation": "model stopped without additional tool calls",
+                    }
+
+                round_payload = {
+                    "round": round_index,
+                    "prompt": round_message,
+                    "thought": accumulated_thought,
+                    "result": result_data,
+                    "execution": execution_result,
+                    "error": execution_result.get("error"),
+                }
+                loop_rounds.append(round_payload)
+                loop_history.append(_build_auto_history_entry(round_payload))
+
+                yield json.dumps({
+                    "type": "loop_round",
+                    "data": round_payload,
+                }, ensure_ascii=False) + "\n"
+
+                if execution_result.get("error"):
+                    stop_reason = "execution_error"
+                    break
+                if not has_tool_calls:
+                    stop_reason = "model_stopped_using_tools"
+                    yield json.dumps({
+                        "type": "loop_status",
+                        "data": {
+                            "round": round_index,
+                            "phase": "report_generating",
+                            "message": "final report is being generated",
+                        },
+                    }, ensure_ascii=False) + "\n"
+                    break
+                if round_index >= req.max_rounds:
+                    stop_reason = "max_rounds_reached"
+                    yield json.dumps({
+                        "type": "loop_status",
+                        "data": {
+                            "round": round_index,
+                            "phase": "report_generating",
+                            "message": "final report is being generated",
+                        },
+                    }, ensure_ascii=False) + "\n"
+                    break
+
+            report_md = direct_report_md or generate_auto_analysis_report(
+                message=message,
+                loop_rounds=loop_rounds,
+                business_knowledge=business_knowledge,
+                stop_reason=stop_reason,
+                provider=req.provider,
+                model=req.model,
+            )
+            yield json.dumps({
+                "type": "report",
+                "data": {
+                    "markdown": report_md,
+                    "stop_reason": stop_reason,
+                    "rounds_completed": len(loop_rounds),
+                },
+            }, ensure_ascii=False) + "\n"
+
+            iteration_payload = _build_auto_iteration_payload(
+                message=message,
+                session_id=session_id,
+                sandbox_id=req.sandbox_id,
+                selected_tables=selected_tables,
+                session=session,
+                loop_rounds=loop_rounds,
+                report_md=report_md,
+                stop_reason=stop_reason,
+                max_rounds=req.max_rounds,
+            )
+            last_result = (loop_rounds[-1].get("result") if loop_rounds else {}) or {}
+
+            iteration_id = store.append_iteration(user.user_id, session_id, iteration_payload)
+            proposal_id = store.create_proposal({
+                "user_id": user.user_id,
+                "session_id": session_id,
+                "sandbox_id": req.sandbox_id,
+                "mode": "auto_analysis",
+                "message": message,
+                "steps": iteration_payload.get("steps", []),
+                "explanation": last_result.get("explanation", ""),
+                "tables": selected_tables,
+                "status": "executed",
+                "result_rows": _get_last_result_rows(loop_rounds),
+                "chart_specs": iteration_payload.get("chart_specs", []),
+                "selected_tables": selected_tables,
+                "session_patches": list(session.get("patches", [])),
+                "loop_rounds": loop_rounds,
+                "final_report_md": report_md,
+                "report_meta": iteration_payload.get("report_meta", {}),
+            })
+
+            yield json.dumps({
+                "type": "analysis_complete",
+                "data": {
+                    "iteration_id": iteration_id,
+                    "session_id": session_id,
+                    "proposal_id": proposal_id,
+                    "stop_reason": stop_reason,
+                    "rounds_completed": len(loop_rounds),
+                    "max_rounds_hit": iteration_payload.get("report_meta", {}).get("max_rounds_hit", False),
+                    "result_count": len(_get_last_result_rows(loop_rounds)),
+                },
+            }, ensure_ascii=False) + "\n"
+        except RuntimeError as exc:
+            yield json.dumps({"type": "error", "message": str(exc)}, ensure_ascii=False) + "\n"
+        except Exception as exc:
+            internal_error = t("error_internal", default="服务端内部错误")
             yield json.dumps({"type": "error", "message": f"{internal_error}: {str(exc)}"}, ensure_ascii=False) + "\n"
 
     return StreamingResponse(stream_generator(), media_type="application/x-ndjson")
