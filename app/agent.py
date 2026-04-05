@@ -139,8 +139,6 @@ def generate_data_insight(
 
         return
 
-
-
     question_label = t("label_user_question", default="用户问题")
 
     sql_label = t("label_executed_sql", default="执行 SQL")
@@ -419,6 +417,17 @@ def _build_iteration_user_prompt(
 
     question_label = t("label_user_question", default="用户问题")
 
+    db_type_label = _describe_database_type(sandbox)
+    db_type_title = t("title_database_type", default="【数据库类型】")
+    db_type_label_name = t("label_database_type", default="数据库类型")
+    db_type_note = t(
+        "note_database_dialect",
+        default="请严格按照该数据库方言编写 SQL，避免使用不支持的函数或语法。",
+    )
+    parts.append(db_type_title)
+    parts.append(f"{db_type_label_name}: {db_type_label}")
+    parts.append(db_type_note)
+    parts.append("")
     parts.append(f"{question_label}: {message}")
 
     
@@ -499,6 +508,35 @@ def _is_json_parse_failure_payload(parsed: dict) -> bool:
         if "json" in str(text).lower():
             return True
     return False
+
+
+def _describe_database_type(sandbox: dict) -> str:
+    """Return a human-friendly database type label for prompt context."""
+    db_connection = sandbox.get("db_connection") or {}
+    db_config = sandbox.get("db_config") or {}
+    raw_db_type = (
+        db_connection.get("db_type") if isinstance(db_connection, dict) else None
+    ) or (
+        db_config.get("db_type") if isinstance(db_config, dict) else None
+    ) or sandbox.get("db_type") or sandbox.get("database_type") or ""
+
+    db_type = str(raw_db_type).strip().lower()
+    if not db_type:
+        return "未知"
+
+    label_map = {
+        "sqlite": "SQLite",
+        "mysql": "MySQL",
+        "postgresql": "PostgreSQL",
+        "postgres": "PostgreSQL",
+        "mssql": "SQL Server",
+        "sqlserver": "SQL Server",
+        "oracle": "Oracle",
+        "duckdb": "DuckDB",
+        "clickhouse": "ClickHouse",
+        "impala": "Impala",
+    }
+    return label_map.get(db_type, db_type.upper())
 
 
 
