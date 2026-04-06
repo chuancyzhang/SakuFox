@@ -211,6 +211,24 @@ class NotebookKernel:
     ) -> dict:
         self.touch()
 
+        # Re-bind round-local df aliases so Python `df0/df1/...` always map to
+        # SQL outputs from the current analysis round (step order), not stale
+        # session-level historical cells.
+        round_sql_frames: list[pd.DataFrame] = []
+        for step_result in step_results:
+            if not isinstance(step_result, dict):
+                continue
+            if step_result.get("error"):
+                continue
+            rows = step_result.get("rows")
+            if not isinstance(rows, list):
+                continue
+            round_sql_frames.append(pd.DataFrame(rows))
+        for idx, frame in enumerate(round_sql_frames):
+            self.shared_namespace[f"df{idx}"] = frame
+        if round_sql_frames:
+            self.shared_namespace["df"] = round_sql_frames[-1]
+
         def execute_select_sql_helper(sql: str, source: str = "main") -> list[dict]:
             if str(source).strip().lower() == "scratch":
                 rows = self.query_scratch_rows(sql)

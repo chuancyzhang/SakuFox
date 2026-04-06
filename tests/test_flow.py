@@ -1,6 +1,7 @@
 import json
 
 import app.main as main_module
+import pandas as pd
 from fastapi.testclient import TestClient
 
 from app.main import app
@@ -415,6 +416,80 @@ def test_auto_analyze_converges_on_repeated_topic(monkeypatch):
     complete_event = next(event for event in events if event["type"] == "analysis_complete")
     assert complete_event["data"]["stop_reason"] == "repeated_topic"
     assert call_state["count"] == 3
+
+
+def test_execute_analysis_steps_rebinds_df_aliases_per_round(monkeypatch):
+    session_id = "sess_df_alias_rebind"
+    sandbox_id = "sb_flights_overview"
+
+    def fake_query_rows(sql: str, sandbox_id: str | None = None):
+        sql_text = str(sql).lower()
+        if "travel_class" in sql_text:
+            return pd.DataFrame(
+                [
+                    {"department": "Sales", "travel_class": "Economy", "trip_count": 10},
+                    {"department": "Sales", "travel_class": "Business", "trip_count": 4},
+                ]
+            )
+        return pd.DataFrame(
+            [
+                {"department": "Sales", "trip_count": 14},
+                {"department": "HR", "trip_count": 7},
+            ]
+        )
+
+    monkeypatch.setattr(main_module, "_query_rows", fake_query_rows)
+
+    round1 = main_module._execute_analysis_steps(
+        result_data={
+            "steps": [
+                {
+                    "tool": "sql",
+                    "source": "main",
+                    "code": "SELECT department, COUNT(*) AS trip_count FROM tutorial_flights GROUP BY department",
+                },
+                {
+                    "tool": "python",
+                    "code": "final_df = df0.copy()",
+                },
+            ]
+        },
+        sandbox={"uploads": {}, "upload_paths": {}},
+        selected_tables=["tutorial_flights"],
+        selected_files=[],
+        sandbox_id=sandbox_id,
+        session_id=session_id,
+    )
+    assert not round1.get("error")
+    assert round1.get("rows")
+    assert "travel_class" not in round1["rows"][0]
+
+    round2 = main_module._execute_analysis_steps(
+        result_data={
+            "steps": [
+                {
+                    "tool": "sql",
+                    "source": "main",
+                    "code": "SELECT department, travel_class, COUNT(*) AS trip_count FROM tutorial_flights GROUP BY department, travel_class",
+                },
+                {
+                    "tool": "python",
+                    "code": "final_df = df0[['travel_class']].copy()",
+                },
+            ]
+        },
+        sandbox={"uploads": {}, "upload_paths": {}},
+        selected_tables=["tutorial_flights"],
+        selected_files=[],
+        sandbox_id=sandbox_id,
+        session_id=session_id,
+    )
+    try:
+        assert not round2.get("error")
+        assert round2.get("rows")
+        assert "travel_class" in round2["rows"][0]
+    finally:
+        main_module.destroy_kernel(session_id)
 
 
 def test_save_skill_persists_context_snapshot_metadata():

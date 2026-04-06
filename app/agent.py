@@ -1704,31 +1704,96 @@ def _build_fallback_report_bundle(markdown_text: str, chart_specs: list[dict]) -
     }
 
 
+def _build_polished_report_sections(markdown_text: str, fallback_title: str) -> tuple[str, str, str]:
+    lines = str(markdown_text or "").splitlines()
+    title = fallback_title
+    intro_lines: list[str] = []
+    sections: list[tuple[int, str, list[str]]] = []
+    current_heading = ""
+    current_level = 2
+    current_lines: list[str] = []
+
+    def flush_current() -> None:
+        nonlocal current_heading, current_lines, current_level
+        if current_heading or any(line.strip() for line in current_lines):
+            heading = current_heading or ("Overview" if get_lang() == "en" else "概览")
+            sections.append((current_level, heading, current_lines))
+        current_heading = ""
+        current_level = 2
+        current_lines = []
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("# "):
+            if title == fallback_title:
+                title = stripped[2:].strip() or title
+            else:
+                flush_current()
+                current_heading = stripped[2:].strip()
+                current_level = 2
+            continue
+        if stripped.startswith("## "):
+            flush_current()
+            current_heading = stripped[3:].strip()
+            current_level = 2
+            continue
+        if stripped.startswith("### "):
+            flush_current()
+            current_heading = stripped[4:].strip()
+            current_level = 3
+            continue
+        if current_heading or sections:
+            current_lines.append(line)
+        else:
+            intro_lines.append(line)
+
+    if intro_lines:
+        sections.insert(0, (2, "Overview" if get_lang() == "en" else "概览", intro_lines))
+    flush_current()
+    if not sections and str(markdown_text or "").strip():
+        sections.append((2, "Overview" if get_lang() == "en" else "概览", lines))
+
+    rendered_sections: list[str] = []
+    for idx, (_, heading, body_lines) in enumerate(sections, start=1):
+        body_html = _render_markdown_like_html("\n".join(body_lines).strip())
+        if not body_html:
+            body_html = "<p>-</p>"
+        rendered_sections.append(
+            '<section class="report-section">'
+            f'<div class="section-index">{idx:02d}</div>'
+            f"<h2>{html.escape(heading)}</h2>"
+            f'<div class="section-body">{body_html}</div>'
+            "</section>"
+        )
+
+    summary = _strip_markdown_to_plain_text(markdown_text).replace("\n", " ")
+    return title, (summary[:240] if summary else ""), "\n".join(rendered_sections)
+
+
 def _markdown_to_basic_html(markdown_text: str, extra_blocks: str = "") -> str:
     is_en = get_lang() == "en"
     html_lang = "en" if is_en else "zh-CN"
     report_title = "Auto Analysis Report" if is_en else "自动分析报告"
-    rendered = _render_markdown_like_html(markdown_text)
+    report_title, summary, rendered = _build_polished_report_sections(markdown_text, report_title)
+    eyebrow = "AI Analysis Report" if is_en else "AI 分析报告"
+    summary_html = f"<p>{html.escape(summary)}</p>" if summary else ""
     return (
         f"<!doctype html><html lang=\"{html_lang}\"><head><meta charset=\"UTF-8\"/>"
         "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\"/>"
-        f"<title>{report_title}</title>"
-        "<style>body{font-family:Inter,Arial,sans-serif;margin:0;background:#f8fafc;color:#0f172a}"
-        ".paper{max-width:1080px;margin:24px auto;padding:28px;background:#fff;border:1px solid #e2e8f0;border-radius:14px}"
-        ".content{font-size:14px;line-height:1.7}"
-        ".content h1,.content h2,.content h3{margin:18px 0 10px;line-height:1.35}"
-        ".content p{margin:10px 0}"
-        ".content ul,.content ol{margin:8px 0 12px 22px}"
-        ".content li{margin:4px 0}"
-        ".content table{width:100%;border-collapse:collapse;margin:14px 0;font-size:13px}"
-        ".content th,.content td{border:1px solid #e2e8f0;padding:8px 10px;text-align:left;vertical-align:top}"
-        ".content th{background:#f8fafc;font-weight:700;color:#0f172a}"
-        ".content code{padding:1px 5px;border-radius:4px;background:#e2e8f0;font-family:Consolas,monospace}"
-        ".content hr{border:none;border-top:1px solid #e2e8f0;margin:18px 0}"
-        "@media print{body{background:#fff}.paper{border:none;max-width:none;margin:0;padding:0}}</style>"
-        "</head><body><main class=\"paper\">"
-        f"<h1 style=\"margin-top:0;\">{report_title}</h1>"
-        f"<div class=\"content\">{rendered}</div>"
+        f"<title>{html.escape(report_title)}</title>"
+        "<style>:root{color-scheme:light}*{box-sizing:border-box}body{font-family:Inter,Arial,sans-serif;margin:0;background:#eef3f8;color:#0f172a}"
+        ".report{max-width:1180px;margin:0 auto;padding:32px 24px 48px}.hero{background:#0f172a;color:#fff;border-radius:8px;padding:34px 38px;margin-bottom:22px;position:relative;overflow:hidden}"
+        ".hero:after{content:\"\";position:absolute;inset:auto -90px -120px auto;width:260px;height:260px;border-radius:50%;background:rgba(14,165,233,.22)}"
+        ".eyebrow{font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:#7dd3fc;font-weight:700;margin-bottom:10px}.hero h1{font-size:34px;line-height:1.25;margin:0;max-width:840px}.hero p{max-width:920px;color:#dbeafe;line-height:1.7;margin:14px 0 0}"
+        ".report-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px}.report-section{background:#fff;border:1px solid #dbe5ef;border-radius:8px;padding:22px 24px;box-shadow:0 12px 34px rgba(15,23,42,.08);position:relative;overflow:hidden}"
+        ".report-section:before{content:\"\";position:absolute;left:0;top:0;bottom:0;width:4px;background:#0ea5e9}.report-section:first-child{grid-column:1/-1}.section-index{font-size:12px;color:#0284c7;font-weight:800;margin-bottom:8px}.report-section h2{margin:0 0 14px;font-size:22px;line-height:1.35}"
+        ".section-body{font-size:15px;line-height:1.75;color:#1f2937}.section-body p{margin:10px 0}.section-body ul,.section-body ol{margin:10px 0 0 22px;padding:0}.section-body li{margin:7px 0}.section-body strong{color:#0f172a}.section-body code{padding:2px 6px;border-radius:5px;background:#e2e8f0;font-family:Consolas,monospace}"
+        ".section-body table{width:100%;border-collapse:separate;border-spacing:0;margin:14px 0;font-size:13px;overflow:hidden;border:1px solid #dbe5ef;border-radius:8px}.section-body th,.section-body td{padding:10px 12px;text-align:left;vertical-align:top;border-bottom:1px solid #e2e8f0}.section-body th{background:#f1f7fb;color:#0f172a;font-weight:800}.section-body tr:last-child td{border-bottom:0}"
+        "section[data-chart-id],div[data-chart-id]{min-height:260px}.report>section{background:#fff;border:1px solid #dbe5ef;border-radius:8px;padding:22px 24px;margin-top:18px;box-shadow:0 12px 34px rgba(15,23,42,.08)}"
+        "@media(max-width:860px){.report{padding:18px 12px 32px}.hero{padding:26px 22px}.hero h1{font-size:28px}.report-grid{grid-template-columns:1fr}}@media print{body{background:#fff}.report{max-width:none;padding:0}.hero,.report-section,.report>section{box-shadow:none;border-color:#d7dee8}}</style>"
+        "</head><body><main class=\"report\">"
+        f"<header class=\"hero\"><div class=\"eyebrow\">{eyebrow}</div><h1>{html.escape(report_title)}</h1>{summary_html}</header>"
+        f"<div class=\"report-grid\">{rendered}</div>"
         f"{extra_blocks}"
         "</main></body></html>"
     )
