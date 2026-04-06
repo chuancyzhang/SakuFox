@@ -1,6 +1,7 @@
 import html
 import json
 import io
+import sqlite3
 import re
 import uuid
 from pathlib import Path
@@ -16,6 +17,7 @@ from app.i18n import get_lang, set_lang, t
 
 from app.agent import (
     run_analysis_iteration,
+    synthesize_iteration_result,
     generate_auto_analysis_report,
     generate_auto_analysis_report_bundle,
     generate_data_insight,
@@ -45,10 +47,13 @@ from app.models import (
     MountKnowledgeBasesRequest,
     MountSkillsRequest,
 )
+from app.notebook_kernel import create_kernel, destroy_kernel
 from app.python_sandbox import run_python_pipeline
 from app.skills import list_skills, save_skill_from_proposal, build_context_snapshot_for_proposal
 from app.tools import execute_select_sql_with_mask
 from app.store import User, store
+
+ITERATE_MAX_ROUNDS = 8
 
 app = FastAPI(title=t("app_title", default="SakuFox 🦊 - 敏捷智能数据分析平台"))
 web_dir = Path(__file__).resolve().parent.parent / "web"
@@ -118,20 +123,29 @@ def _build_iteration_message(
     original_message: str,
     round_index: int,
     previous_round: dict | None = None,
+    *,
+    mode: str = "auto",
+    max_rounds: int | None = None,
 ) -> str:
     is_en = get_lang() == "en"
+    mode_label = "one-click auto-analysis" if mode == "auto" else "iterative notebook analysis"
+    round_budget = max_rounds or (100 if mode == "auto" else ITERATE_MAX_ROUNDS)
     if round_index <= 1 or previous_round is None:
         if is_en:
             return (
                 f"{original_message}\n\n"
-                "You are in one-click auto-analysis mode. If you still need SQL or Python tools, output steps. "
-                "If no more tool use is needed, output empty steps and provide final conclusions, action items, and a report outline. "
+                f"You are in {mode_label} mode with a maximum of {round_budget} rounds. "
+                "If you still need SQL or Python tools, output steps only and keep narrative analysis empty for this planning stage. "
+                "If no more tool use is needed, output empty steps and provide direct_answer, final conclusions, action items, and a report outline. "
+                "Never leave Python variables, f-string fragments, or placeholders such as {top_dept} in narrative text; all narrative text must contain final concrete values. "
                 "Keep all narrative fields in English."
             )
         return (
             f"{original_message}\n\n"
-            "你处于一键自动分析模式。如果还需要 SQL 或 Python 工具，请继续输出 steps。"
-            "如果不再需要工具调用，请输出空 steps，并给出最终结论、行动建议和报告提纲。"
+            f"你处于{'一键自动分析' if mode == 'auto' else '交互式 notebook 分析'}模式，最多可进行 {round_budget} 轮。"
+            "如果还需要 SQL 或 Python 工具，请只输出 steps，规划阶段不要提前输出分析结论。"
+            "如果不再需要工具调用，请输出空 steps，并给出 direct_answer、最终结论、行动建议和报告提纲。"
+            "叙述文本里绝不能保留 Python 变量名、f-string 片段或类似 {top_dept} 的占位符，必须写成最终的具体值。"
             "JSON 的字段名保持英文，但所有结论与说明文本必须使用简体中文。"
         )
 
@@ -147,25 +161,342 @@ def _build_iteration_message(
     rows_count = len(execution.get("rows") or [])
     charts_count = len(execution.get("chart_specs") or [])
     error_text = execution.get("error") or previous_round.get("error") or no_data_label
+    warning_items = _extract_execution_warnings(execution)
+    warning_text = "; ".join(warning_items[:3]) if warning_items else no_data_label
     if is_en:
         return (
             f"{original_message}\n\n"
-            f"This is auto-analysis round {round_index}. Continue from the previous round.\n"
-            f"Previous conclusions: {conclusions}\n"
-            f"Previous actions: {actions}\n"
-            f"Previous result rows: {rows_count}; charts: {charts_count}; error: {error_text}\n"
-            "If more tool calls are needed, keep outputting SQL/Python steps. If analysis is sufficient, output empty steps and finalize the conclusions. "
+            f"This is {mode_label} round {round_index} of up to {round_budget}. Continue from the previous round.\n"
+            f"Known findings from previous rounds (context only, do not restate): {conclusions}\n"
+            f"Known actions from previous rounds (context only, do not restate): {actions}\n"
+            f"Previous result rows: {rows_count}; charts: {charts_count}; error: {error_text}; warnings: {warning_text}\n"
+            "If more tool calls are needed, output only SQL/Python steps for this planning stage. Explore a new angle or fix the current blocker. If analysis is sufficient, output empty steps, give a direct_answer, and finalize the conclusions. "
+            "Do not repeat the same findings unless new evidence changes them.\n"
+            "Never leave placeholders, Python variables, or f-string fragments like {metric_name} in narrative output; replace them with final concrete values.\n"
             "Keep all narrative fields in English."
         )
     return (
         f"{original_message}\n\n"
-        f"当前是一键自动分析第 {round_index} 轮，请延续上一轮继续分析。\n"
-        f"上一轮结论：{conclusions}\n"
-        f"上一轮行动建议：{actions}\n"
-        f"上一轮结果行数：{rows_count}；图表数：{charts_count}；错误：{error_text}\n"
-        "如果还需要工具调用，请继续输出 SQL/Python steps；如果分析已充分，请输出空 steps 并收敛为最终结论。"
+        f"当前是{'一键自动分析' if mode == 'auto' else '交互式 notebook 分析'}第 {round_index} 轮，最多 {round_budget} 轮，请延续上一轮继续分析。\n"
+        f"上一轮已知发现（仅作上下文，不要重复输出）：{conclusions}\n"
+        f"上一轮已知动作建议（仅作上下文，不要重复输出）：{actions}\n"
+        f"上一轮结果行数：{rows_count}；图表数：{charts_count}；错误：{error_text}；告警：{warning_text}\n"
+        "如果还需要工具调用，本阶段只输出 SQL/Python steps，不要提前输出分析结论；每一轮都应探索新的角度或修复当前阻塞。"
+        "如果分析已充分，请输出空 steps、给出 direct_answer，并收敛为最终结论。"
+        "不要在没有新增证据的情况下重复输出上一轮已经确认的结论。"
+        "叙述文本里绝不能保留 Python 变量名、f-string 片段或类似 {metric_name} 的占位符，必须写成最终的具体值。"
         "JSON 的字段名保持英文，但所有结论与说明文本必须使用简体中文。"
     )
+
+
+def _iter_notebook_rounds(
+    *,
+    message: str,
+    analysis_sandbox: dict,
+    sandbox: dict,
+    session_id: str,
+    sandbox_id: str,
+    selected_tables: list[str],
+    selected_files: list[str],
+    iteration_history: list[dict],
+    business_knowledge: list[str],
+    provider: str | None,
+    model: str | None,
+    max_rounds: int,
+    mode: str,
+) -> tuple[list[dict], str, str]:
+    loop_rounds: list[dict] = []
+    loop_history = list(iteration_history)
+    stop_reason = "model_stopped_using_tools"
+    direct_report_md = ""
+
+    for round_index in range(1, max_rounds + 1):
+        round_message = _build_iteration_message(
+            original_message=message,
+            round_index=round_index,
+            previous_round=loop_rounds[-1] if loop_rounds else None,
+            mode=mode,
+            max_rounds=max_rounds,
+        )
+        accumulated_thought = ""
+        result_data = None
+        for event in run_analysis_iteration(
+            message=round_message,
+            sandbox=analysis_sandbox,
+            iteration_history=loop_history,
+            business_knowledge=business_knowledge,
+            provider=provider,
+            model=model,
+        ):
+            if event.get("type") == "thought":
+                accumulated_thought += event.get("content", "")
+            elif event.get("type") == "result":
+                result_data = event.get("data")
+
+        if result_data is None:
+            raise RuntimeError("analysis round returned no result")
+
+        execution_result = {"rows": [], "tables": [], "chart_specs": [], "step_results": []}
+        has_tool_calls = bool(result_data.get("steps"))
+        direct_report_md = str(result_data.get("direct_report", "") or "").strip()
+        if not has_tool_calls and round_index == 1 and not direct_report_md:
+            bootstrap_steps = _build_bootstrap_auto_steps(selected_tables, selected_files)
+            if bootstrap_steps:
+                result_data = {
+                    **result_data,
+                    "steps": bootstrap_steps,
+                    "tools_used": ["execute_select_sql"] if any(s.get("tool") == "sql" for s in bootstrap_steps) else ["python_interpreter"],
+                    "explanation": "system bootstrap: first round had no tool plan; injected exploration steps",
+                }
+                has_tool_calls = True
+        if has_tool_calls:
+            execution_result = _execute_analysis_steps(
+                result_data=result_data,
+                sandbox=sandbox,
+                selected_tables=selected_tables,
+                selected_files=selected_files,
+                sandbox_id=sandbox_id,
+                session_id=session_id,
+            )
+            reflected_result = synthesize_iteration_result(
+                message=message,
+                sandbox=analysis_sandbox,
+                iteration_history=loop_history,
+                business_knowledge=business_knowledge,
+                planned_result=result_data,
+                execution_result=execution_result,
+                incremental=True,
+                provider=provider,
+                model=model,
+            )
+            result_data = {
+                **reflected_result,
+                "steps": result_data.get("steps", []),
+                "tools_used": result_data.get("tools_used", []),
+                "goal": reflected_result.get("goal") or result_data.get("goal", ""),
+                "observation_focus": reflected_result.get("observation_focus") or result_data.get("observation_focus", ""),
+                "continue_reason": reflected_result.get("continue_reason") or result_data.get("continue_reason", ""),
+                "stop_if": reflected_result.get("stop_if") or result_data.get("stop_if", ""),
+                "finalize": bool(reflected_result.get("finalize", result_data.get("finalize", False))),
+            }
+            result_data = _hydrate_result_templates(result_data, execution_result)
+        elif _is_json_parse_failure_result(result_data):
+            result_data = {
+                **result_data,
+                "conclusions": [],
+                "hypotheses": [],
+                "action_items": [],
+                "explanation": "model stopped without additional tool calls",
+            }
+
+        unresolved_placeholders = _contains_unresolved_placeholders(
+            {
+                "direct_answer": result_data.get("direct_answer"),
+                "explanation": result_data.get("explanation"),
+                "conclusions": result_data.get("conclusions"),
+                "hypotheses": result_data.get("hypotheses"),
+                "action_items": result_data.get("action_items"),
+            }
+        )
+        if unresolved_placeholders:
+            execution_result["template_warning"] = "unresolved_placeholders"
+            if loop_rounds and not has_tool_calls and _has_meaningful_round_output(result_data, execution_result):
+                stop_reason = "unresolved_placeholders"
+                break
+
+        round_payload = {
+            "round": round_index,
+            "prompt": round_message,
+            "thought": accumulated_thought,
+            "result": result_data,
+            "execution": execution_result,
+            "error": execution_result.get("error"),
+        }
+        if (
+            loop_rounds
+            and _extract_execution_warnings(execution_result)
+            and _warning_loop_signature(round_payload) == _warning_loop_signature(loop_rounds[-1])
+        ):
+            stop_reason = "repeated_warning_loop"
+            break
+        if mode == "auto" and _is_repeated_topic_round(round_payload, loop_rounds):
+            stop_reason = "repeated_topic"
+            break
+        if loop_rounds and _round_signature(round_payload) == _round_signature(loop_rounds[-1]):
+            stop_reason = "repeated_round"
+            break
+        loop_rounds.append(round_payload)
+        loop_history.append(_build_auto_history_entry(round_payload))
+        yield round_payload
+
+        if execution_result.get("error"):
+            stop_reason = "execution_error"
+            break
+        if not has_tool_calls:
+            stop_reason = "model_stopped_using_tools"
+            break
+        if round_index >= max_rounds:
+            stop_reason = "max_rounds_reached"
+            break
+
+    return {
+        "loop_rounds": loop_rounds,
+        "stop_reason": stop_reason,
+        "direct_report_md": direct_report_md,
+    }
+
+
+def _run_notebook_rounds(
+    *,
+    message: str,
+    analysis_sandbox: dict,
+    sandbox: dict,
+    session_id: str,
+    sandbox_id: str,
+    selected_tables: list[str],
+    selected_files: list[str],
+    iteration_history: list[dict],
+    business_knowledge: list[str],
+    provider: str | None,
+    model: str | None,
+    max_rounds: int,
+    mode: str,
+) -> tuple[list[dict], str, str]:
+    round_iter = _iter_notebook_rounds(
+        message=message,
+        analysis_sandbox=analysis_sandbox,
+        sandbox=sandbox,
+        session_id=session_id,
+        sandbox_id=sandbox_id,
+        selected_tables=selected_tables,
+        selected_files=selected_files,
+        iteration_history=iteration_history,
+        business_knowledge=business_knowledge,
+        provider=provider,
+        model=model,
+        max_rounds=max_rounds,
+        mode=mode,
+    )
+    loop_rounds: list[dict] = []
+    stop_reason = "model_stopped_using_tools"
+    direct_report_md = ""
+    while True:
+        try:
+            round_payload = next(round_iter)
+            loop_rounds.append(round_payload)
+        except StopIteration as stop:
+            stop_value = stop.value if isinstance(stop.value, dict) else {}
+            stop_reason = str(stop_value.get("stop_reason", stop_reason) or stop_reason)
+            direct_report_md = str(stop_value.get("direct_report_md", "") or "")
+            break
+    return loop_rounds, stop_reason, direct_report_md
+
+
+def _extract_execution_warnings(execution: dict) -> list[str]:
+    warnings: list[str] = []
+    seen: set[str] = set()
+    if not isinstance(execution, dict):
+        return warnings
+    top_level_candidates = [
+        execution.get("warning"),
+        execution.get("template_warning"),
+    ]
+    for candidate in top_level_candidates:
+        text = str(candidate or "").strip()
+        if text and text not in seen:
+            seen.add(text)
+            warnings.append(text)
+    for step_result in execution.get("step_results", []) or []:
+        if not isinstance(step_result, dict):
+            continue
+        for key in ("warning", "error"):
+            text = str(step_result.get(key) or "").strip()
+            if text and text not in seen:
+                seen.add(text)
+                warnings.append(text)
+    return warnings
+
+
+def _warning_loop_signature(round_payload: dict) -> str:
+    result = round_payload.get("result") or {}
+    execution = round_payload.get("execution") or {}
+    steps = [
+        {
+            "tool": str(step.get("tool", "")).strip().lower(),
+            "source": str(step.get("source", "")).strip().lower(),
+            "code": _normalize_round_text(str(step.get("code", "")).strip()[:400]),
+        }
+        for step in (result.get("steps") or [])[:12]
+        if isinstance(step, dict)
+    ]
+    warning_texts = [_normalize_round_text(item[:400]) for item in _extract_execution_warnings(execution)]
+    payload = {
+        "steps": steps,
+        "warnings": warning_texts,
+    }
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+
+
+def _normalize_topic_text(value: str) -> str:
+    text = _normalize_round_text(value).lower()
+    text = re.sub(r"\d+(?:\.\d+)?%?", "0", text)
+    text = re.sub(r"[，。、“”‘’；：,.!?;:()\[\]{}<>《》|/\\\-+*=~`\"']", " ", text)
+    tokens = [
+        token
+        for token in re.split(r"\s+", text)
+        if len(token) >= 2 and token not in {"the", "and", "with", "from", "where", "select", "group", "order", "limit"}
+    ]
+    return " ".join(tokens[:80])
+
+
+def _round_topic_signature(round_payload: dict) -> str:
+    result = round_payload.get("result") or {}
+    execution = round_payload.get("execution") or {}
+    conclusion_text = " ".join(
+        str(item.get("text", "")).strip()
+        for item in (result.get("conclusions") or [])[:5]
+        if isinstance(item, dict) and str(item.get("text", "")).strip()
+    )
+    action_text = " ".join(str(item).strip() for item in (result.get("action_items") or [])[:5] if str(item).strip())
+    step_text = " ".join(
+        str(step.get("code", "")).strip()[:500]
+        for step in (result.get("steps") or [])[:6]
+        if isinstance(step, dict)
+    )
+    tables_text = " ".join(str(item).strip() for item in (execution.get("tables") or [])[:10] if str(item).strip())
+    chart_text = " ".join(
+        " ".join(
+            str(spec.get(key, "") or "").strip()
+            for key in ("title", "chart_title", "type", "chart_type", "x", "x_field", "y", "y_field")
+        )
+        for spec in (execution.get("chart_specs") or [])[:5]
+        if isinstance(spec, dict)
+    )
+    return _normalize_topic_text(" ".join([conclusion_text, action_text, step_text, tables_text, chart_text]))
+
+
+def _is_repeated_topic_round(current_round: dict, previous_rounds: list[dict]) -> bool:
+    if len(previous_rounds) < 2:
+        return False
+    current_signature = _round_topic_signature(current_round)
+    if not current_signature:
+        return False
+    recent_signatures = [_round_topic_signature(item) for item in previous_rounds[-2:]]
+    if any(not signature for signature in recent_signatures):
+        return False
+    if current_signature == recent_signatures[-1] == recent_signatures[-2]:
+        return True
+
+    current_tokens = set(current_signature.split())
+    if len(current_tokens) < 8:
+        return False
+    overlaps = []
+    for signature in recent_signatures:
+        tokens = set(signature.split())
+        if not tokens:
+            return False
+        overlaps.append(len(current_tokens & tokens) / max(1, len(current_tokens | tokens)))
+    return min(overlaps) >= 0.78
 
 
 def _build_auto_history_entry(round_payload: dict) -> dict:
@@ -177,7 +508,86 @@ def _build_auto_history_entry(round_payload: dict) -> dict:
         "message": f"Auto round {round_payload.get('round', '?')} rows={rows_count}",
         "conclusions": result.get("conclusions", []),
         "hypotheses": result.get("hypotheses", []),
+        "warnings": _extract_execution_warnings(execution),
     }
+
+
+def _round_signature(round_payload: dict) -> str:
+    result = round_payload.get("result") or {}
+    execution = round_payload.get("execution") or {}
+
+    def _row_preview(row: dict) -> dict:
+        if not isinstance(row, dict):
+            return {"value": str(row)[:120]}
+        preview = {}
+        for key in sorted(row.keys())[:8]:
+            value = row.get(key)
+            if isinstance(value, (str, int, float, bool)) or value is None:
+                preview[key] = value
+            else:
+                preview[key] = str(value)[:120]
+        return preview
+
+    conclusions = [
+        {
+            "text": _normalize_round_text(item.get("text", "")),
+            "confidence": item.get("confidence"),
+        }
+        for item in (result.get("conclusions") or [])[:8]
+        if isinstance(item, dict) and str(item.get("text", "")).strip()
+    ]
+    hypotheses = [
+        {
+            "text": _normalize_round_text(item.get("text", "")),
+            "id": str(item.get("id", "")).strip(),
+        }
+        for item in (result.get("hypotheses") or [])[:8]
+        if isinstance(item, dict) and str(item.get("text", "")).strip()
+    ]
+    actions = [_normalize_round_text(item) for item in (result.get("action_items") or [])[:8] if str(item).strip()]
+    steps = [
+        {
+            "tool": str(step.get("tool", "")).strip().lower(),
+            "source": str(step.get("source", "")).strip().lower(),
+            "code": _normalize_round_text(str(step.get("code", "")).strip()[:400]),
+        }
+        for step in (result.get("steps") or [])[:12]
+        if isinstance(step, dict)
+    ]
+    chart_specs = []
+    for spec in (execution.get("chart_specs") or [])[:10]:
+        if not isinstance(spec, dict):
+            chart_specs.append(str(spec)[:200])
+            continue
+        chart_specs.append({
+            "title": str(spec.get("title", "") or spec.get("chart_title", "") or "").strip(),
+            "type": str(spec.get("type", "") or spec.get("chart_type", "") or "").strip(),
+            "x": str(spec.get("x", "") or spec.get("x_field", "") or "").strip(),
+            "y": str(spec.get("y", "") or spec.get("y_field", "") or "").strip(),
+        })
+    rows = [
+        _row_preview(row)
+        for row in (execution.get("rows") or [])[:5]
+        if row is not None
+    ]
+    payload = {
+        "direct_answer": _normalize_round_text(str(result.get("direct_answer", "") or "").strip()[:240]),
+        "explanation": _normalize_round_text(str(result.get("explanation", "") or "").strip()[:500]),
+        "direct_report": _normalize_round_text(str(result.get("direct_report", "") or "").strip()[:500]),
+        "tools_used": [str(item).strip() for item in (result.get("tools_used") or [])[:8] if str(item).strip()],
+        "conclusions": conclusions,
+        "hypotheses": hypotheses,
+        "action_items": actions,
+        "steps": steps,
+        "rows_count": len(execution.get("rows") or []),
+        "rows_preview": rows,
+        "tables": [str(item).strip() for item in (execution.get("tables") or [])[:20] if str(item).strip()],
+        "chart_specs": chart_specs,
+        "warnings": [_normalize_round_text(item[:400]) for item in _extract_execution_warnings(execution)],
+        "template_warning": str(execution.get("template_warning", "") or "").strip(),
+        "error": str(execution.get("error") or round_payload.get("error") or "").strip()[:400],
+    }
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True)
 
 
 def _build_iteration_context_history(iterations: list[dict]) -> list[dict]:
@@ -265,6 +675,9 @@ def _build_report_bundle_from_markdown(markdown_text: str, chart_specs: list[dic
         ".content p{margin:10px 0}"
         ".content ul,.content ol{margin:8px 0 12px 22px}"
         ".content li{margin:4px 0}"
+        ".content table{width:100%;border-collapse:collapse;margin:14px 0;font-size:13px}"
+        ".content th,.content td{border:1px solid #e2e8f0;padding:8px 10px;text-align:left;vertical-align:top}"
+        ".content th{background:#f8fafc;font-weight:700;color:#0f172a}"
         ".content code{padding:1px 5px;border-radius:4px;background:#e2e8f0;font-family:Consolas,monospace}"
         ".content hr{border:none;border-top:1px solid #e2e8f0;margin:18px 0}"
         "@media print{body{background:#fff}.paper{border:none;max-width:none;margin:0;padding:0}}</style>"
@@ -293,6 +706,7 @@ def _render_markdown_like_html(markdown_text: str) -> str:
     lines = str(markdown_text or "").splitlines()
     out: list[str] = []
     list_mode: str | None = None
+    table_mode = False
 
     def close_list() -> None:
         nonlocal list_mode
@@ -302,47 +716,97 @@ def _render_markdown_like_html(markdown_text: str) -> str:
             out.append("</ol>")
         list_mode = None
 
-    for raw in lines:
+    def close_table() -> None:
+        nonlocal table_mode
+        if table_mode:
+            out.append("</tbody></table>")
+        table_mode = False
+
+    def is_table_separator(line: str) -> bool:
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        return len(cells) >= 2 and all(re.fullmatch(r":?-{3,}:?", cell or "") for cell in cells)
+
+    def parse_table_cells(line: str) -> list[str]:
+        return [cell.strip() for cell in line.strip().strip("|").split("|")]
+
+    index = 0
+    total = len(lines)
+    while index < total:
+        raw = lines[index]
         line = raw.rstrip()
         stripped = line.strip()
+        if stripped and "|" in stripped and index + 1 < total and is_table_separator(lines[index + 1]):
+            close_list()
+            close_table()
+            headers = parse_table_cells(stripped)
+            out.append("<table><thead><tr>" + "".join(f"<th>{inline_render(cell)}</th>" for cell in headers) + "</tr></thead><tbody>")
+            table_mode = True
+            index += 2
+            while index < total:
+                row_text = lines[index].strip()
+                if not row_text or "|" not in row_text or is_table_separator(row_text):
+                    break
+                cells = parse_table_cells(row_text)
+                out.append("<tr>" + "".join(f"<td>{inline_render(cell)}</td>" for cell in cells) + "</tr>")
+                index += 1
+            close_table()
+            continue
+
         if not stripped:
             close_list()
+            close_table()
+            index += 1
             continue
         if stripped == "---":
             close_list()
+            close_table()
             out.append("<hr/>")
+            index += 1
             continue
         if stripped.startswith("### "):
             close_list()
+            close_table()
             out.append(f"<h3>{inline_render(stripped[4:])}</h3>")
+            index += 1
             continue
         if stripped.startswith("## "):
             close_list()
+            close_table()
             out.append(f"<h2>{inline_render(stripped[3:])}</h2>")
+            index += 1
             continue
         if stripped.startswith("# "):
             close_list()
+            close_table()
             out.append(f"<h1>{inline_render(stripped[2:])}</h1>")
+            index += 1
             continue
         if re.match(r"^\d+\.\s+", stripped):
+            close_table()
             if list_mode != "ol":
                 close_list()
                 out.append("<ol>")
                 list_mode = "ol"
             item = re.sub(r"^\d+\.\s+", "", stripped)
             out.append(f"<li>{inline_render(item)}</li>")
+            index += 1
             continue
         if stripped.startswith("- "):
+            close_table()
             if list_mode != "ul":
                 close_list()
                 out.append("<ul>")
                 list_mode = "ul"
             out.append(f"<li>{inline_render(stripped[2:])}</li>")
+            index += 1
             continue
         close_list()
+        close_table()
         out.append(f"<p>{inline_render(stripped)}</p>")
+        index += 1
 
     close_list()
+    close_table()
     return "\n".join(out)
 
 
@@ -553,6 +1017,101 @@ def _build_skill_proposal_fallback(
     return output
 
 
+_PLACEHOLDER_PATTERN = re.compile(r"\{([a-zA-Z_][a-zA-Z0-9_]*)(?::([^}]+))?\}")
+
+
+def _build_result_placeholder_context(execution_result: dict) -> dict[str, object]:
+    context: dict[str, object] = {}
+    rows = execution_result.get("rows") or []
+    if rows and isinstance(rows[0], dict):
+        first_row = rows[0]
+        for key, value in first_row.items():
+            if value is None:
+                continue
+            key_str = str(key)
+            context[key_str] = value
+            context[key_str.lower()] = value
+    exported_vars = execution_result.get("exported_vars") or {}
+    if isinstance(exported_vars, dict):
+        for key, value in exported_vars.items():
+            if value is None:
+                continue
+            key_str = str(key)
+            context[key_str] = value
+            context[key_str.lower()] = value
+    context["rows_count"] = len(rows)
+    context["row_count"] = len(rows)
+    return context
+
+
+def _resolve_template_placeholders(value, context: dict[str, object]):
+    if isinstance(value, str):
+        def replace(match: re.Match) -> str:
+            raw_key = match.group(1)
+            fmt = match.group(2)
+            lookup_key = raw_key if raw_key in context else raw_key.lower()
+            if lookup_key not in context:
+                return match.group(0)
+            resolved = context[lookup_key]
+            if fmt:
+                try:
+                    return format(resolved, fmt)
+                except Exception:
+                    return str(resolved)
+            return str(resolved)
+
+        return _PLACEHOLDER_PATTERN.sub(replace, value)
+    if isinstance(value, list):
+        return [_resolve_template_placeholders(item, context) for item in value]
+    if isinstance(value, dict):
+        return {key: _resolve_template_placeholders(val, context) for key, val in value.items()}
+    return value
+
+
+def _hydrate_result_templates(result_data: dict, execution_result: dict) -> dict:
+    if not result_data:
+        return result_data
+    context = _build_result_placeholder_context(execution_result)
+    if not context:
+        return result_data
+    return _resolve_template_placeholders(result_data, context)
+
+
+def _contains_unresolved_placeholders(value) -> bool:
+    if isinstance(value, str):
+        return bool(_PLACEHOLDER_PATTERN.search(value))
+    if isinstance(value, list):
+        return any(_contains_unresolved_placeholders(item) for item in value)
+    if isinstance(value, dict):
+        return any(_contains_unresolved_placeholders(item) for item in value.values())
+    return False
+
+
+def _normalize_round_text(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    text = _PLACEHOLDER_PATTERN.sub("{placeholder}", text)
+    text = re.sub(r"\s+", " ", text)
+    return text
+
+
+def _has_meaningful_round_output(result_data: dict, execution_result: dict) -> bool:
+    if not isinstance(result_data, dict):
+        return False
+    if str(result_data.get("direct_answer", "") or "").strip():
+        return True
+    if any(str(item).strip() for item in (result_data.get("action_items") or [])):
+        return True
+    if any(isinstance(item, dict) and str(item.get("text", "")).strip() for item in (result_data.get("conclusions") or [])):
+        return True
+    if any(isinstance(item, dict) and str(item.get("text", "")).strip() for item in (result_data.get("hypotheses") or [])):
+        return True
+    if execution_result.get("rows") or execution_result.get("chart_specs"):
+        return True
+    return False
+
+
 def _build_bootstrap_auto_steps(selected_tables: list[str], selected_files: list[str]) -> list[dict]:
     steps: list[dict] = []
     for table_name in selected_tables[:3]:
@@ -675,34 +1234,6 @@ def _build_auto_iteration_payload(
         "session_patches": list(session.get("patches", [])),
     }
 
-
-def _execute_analysis_steps(
-    result_data: dict,
-    sandbox: dict,
-    selected_tables: list[str],
-    selected_files: list[str] | None,
-    sandbox_id: str,
-) -> dict:
-    all_uploads = sandbox.get("uploads", {})
-    all_upload_paths = sandbox.get("upload_paths", {})
-    if selected_files is not None:
-        allowed_uploads = {k: v for k, v in all_uploads.items() if k in selected_files}
-        allowed_upload_paths = {k: v for k, v in all_upload_paths.items() if k in selected_files}
-    else:
-        allowed_uploads = all_uploads
-        allowed_upload_paths = all_upload_paths
-
-    exec_result = _auto_execute(
-        result_data=result_data,
-        allowed_tables=selected_tables,
-        upload_rows=allowed_uploads,
-        upload_paths=allowed_upload_paths,
-        sandbox_id=sandbox_id,
-    )
-    from app.utils import sanitize_for_json
-    return sanitize_for_json(exec_result)
-
-
 # ── Auth ──────────────────────────────────────────────────────────────
 
 
@@ -793,34 +1324,62 @@ def iterate(req: IterateRequest, user: User = Depends(get_current_user)):
 
     def stream_generator():
         try:
-            result_data = None
-            for event in run_analysis_iteration(
+            round_iter = _iter_notebook_rounds(
                 message=message,
-                sandbox=analysis_sandbox,
+                analysis_sandbox=analysis_sandbox,
+                sandbox=sandbox,
+                session_id=session_id,
+                sandbox_id=req.sandbox_id,
+                selected_tables=selected_tables,
+                selected_files=req.selected_files or [],
                 iteration_history=iteration_history,
                 business_knowledge=business_knowledge,
                 provider=req.provider,
                 model=req.model,
-            ):
-                if event.get("type") == "result":
-                    result_data = event["data"]
-                yield json.dumps(event, ensure_ascii=False) + "\n"
+                max_rounds=ITERATE_MAX_ROUNDS,
+                mode="iterate",
+            )
+            loop_rounds: list[dict] = []
+            stop_reason = "model_stopped_using_tools"
+            while True:
+                try:
+                    round_payload = next(round_iter)
+                    loop_rounds.append(round_payload)
+                except StopIteration as stop:
+                    stop_value = stop.value if isinstance(stop.value, dict) else {}
+                    stop_reason = str(stop_value.get("stop_reason", stop_reason) or stop_reason)
+                    break
 
-            # Auto-execute: run SQL + Python if present
-            if result_data:
-                exec_result = _execute_analysis_steps(
-                    result_data=result_data,
-                    sandbox=sandbox,
-                    selected_tables=selected_tables,
-                    selected_files=req.selected_files,
-                    sandbox_id=req.sandbox_id,
-                )
-
-                # Emit data rows
-                if exec_result["rows"]:
-                    yield json.dumps({"type": "data", "rows": exec_result["rows"][:200]}, ensure_ascii=False) + "\n"
-                # Emit per-step results
-                for idx, sr in enumerate(exec_result.get("step_results", [])):
+                round_index = int(round_payload.get("round", len(loop_rounds)) or len(loop_rounds))
+                yield json.dumps({
+                    "type": "loop_status",
+                    "data": {
+                        "round": round_index,
+                        "phase": "planning",
+                        "message": (
+                            f"starting round {round_index}"
+                            if get_lang() == "en"
+                            else f"开始第 {round_index} 轮分析"
+                        ),
+                    },
+                }, ensure_ascii=False) + "\n"
+                if round_payload.get("thought"):
+                    yield json.dumps({
+                        "type": "loop_status",
+                        "data": {
+                            "round": round_index,
+                            "phase": "thinking",
+                            "message": round_payload.get("thought", ""),
+                        },
+                    }, ensure_ascii=False) + "\n"
+                yield json.dumps({"type": "loop_round", "data": round_payload}, ensure_ascii=False) + "\n"
+                if round_payload.get("thought"):
+                    yield json.dumps({"type": "thought", "content": round_payload.get("thought", "")}, ensure_ascii=False) + "\n"
+                yield json.dumps({"type": "result", "data": round_payload.get("result", {})}, ensure_ascii=False) + "\n"
+                execution = round_payload.get("execution") or {}
+                if execution.get("rows"):
+                    yield json.dumps({"type": "data", "rows": execution.get("rows", [])[:200]}, ensure_ascii=False) + "\n"
+                for idx, sr in enumerate(execution.get("step_results", [])):
                     yield json.dumps({
                         "type": "step_result",
                         "step_index": idx,
@@ -830,65 +1389,68 @@ def iterate(req: IterateRequest, user: User = Depends(get_current_user)):
                             "error": sr.get("error", None),
                         },
                     }, ensure_ascii=False) + "\n"
-                # Emit chart specs
-                for spec in exec_result.get("chart_specs", []):
+                for spec in execution.get("chart_specs", []):
                     yield json.dumps({"type": "chart_spec", "data": spec}, ensure_ascii=False) + "\n"
 
-                # Save iteration
-                iteration_id = store.append_iteration(user.user_id, session_id, {
-                    "mode": "manual",
-                    "message": message,
-                    "steps": result_data.get("steps", []),
-                    "conclusions": result_data.get("conclusions", []),
-                    "hypotheses": result_data.get("hypotheses", []),
-                    "action_items": result_data.get("action_items", []),
-                    "tools_used": result_data.get("tools_used", []),
-                    "result_rows": exec_result["rows"][:100],  # store compact
-                    "chart_specs": exec_result.get("chart_specs", []),
-                    "loop_rounds": [],
-                    "final_report_md": "",
-                    "report_title": "",
-                    "final_report_html": "",
-                    "final_report_summary": "",
-                    "final_report_chart_bindings": [],
-                    "report_meta": {},
-                })
+            result_rows = _get_last_result_rows(loop_rounds)
+            iteration_payload = {
+                "mode": "manual",
+                "message": message,
+                "steps": _flatten_loop_steps(loop_rounds),
+                "conclusions": _merge_structured_items(loop_rounds, "conclusions", unique_key="text"),
+                "hypotheses": _merge_structured_items(loop_rounds, "hypotheses", unique_key="text"),
+                "action_items": [str(item) for item in _merge_structured_items(loop_rounds, "action_items")],
+                "tools_used": _merge_tools_used(loop_rounds),
+                "result_rows": result_rows[:100],
+                "chart_specs": _collect_all_charts(loop_rounds),
+                "loop_rounds": loop_rounds,
+                "final_report_md": "",
+                "report_title": "",
+                "final_report_html": "",
+                "final_report_summary": "",
+                "final_report_chart_bindings": [],
+                "report_meta": {
+                    "stop_reason": stop_reason,
+                    "rounds_completed": len(loop_rounds),
+                    "max_rounds_hit": stop_reason == "max_rounds_reached",
+                },
+            }
+            iteration_id = store.append_iteration(user.user_id, session_id, iteration_payload)
+            proposal_id = store.create_proposal({
+                "user_id": user.user_id,
+                "session_id": session_id,
+                "sandbox_id": req.sandbox_id,
+                "mode": "manual",
+                "message": message,
+                "steps": iteration_payload.get("steps", []),
+                "explanation": str(((loop_rounds[-1].get("result") if loop_rounds else {}) or {}).get("explanation", "")),
+                "tables": selected_tables,
+                "status": "executed",
+                "result_rows": result_rows,
+                "chart_specs": iteration_payload.get("chart_specs", []),
+                "selected_tables": selected_tables,
+                "selected_files": req.selected_files or [],
+                "session_patches": list(session.get("patches", [])),
+                "loop_rounds": loop_rounds,
+                "final_report_md": "",
+                "report_title": "",
+                "final_report_html": "",
+                "final_report_summary": "",
+                "final_report_chart_bindings": [],
+                "report_meta": iteration_payload.get("report_meta", {}),
+            })
 
-                # Also create a proposal record for skill-saving compatibility
-                proposal_id = store.create_proposal({
-                    "user_id": user.user_id,
+            yield json.dumps({
+                "type": "iteration_complete",
+                "data": {
+                    "iteration_id": iteration_id,
                     "session_id": session_id,
-                    "sandbox_id": req.sandbox_id,
-                    "mode": "manual",
-                    "message": message,
-                    "steps": result_data.get("steps", []),
-                    "explanation": result_data.get("explanation", ""),
-                    "tables": selected_tables,
-                    "status": "executed",
-                    "result_rows": exec_result["rows"],
-                    "chart_specs": exec_result.get("chart_specs", []),
-                    "selected_tables": selected_tables,
-                    "selected_files": req.selected_files or [],
-                    "session_patches": list(session.get("patches", [])),
-                    "loop_rounds": [],
-                    "final_report_md": "",
-                    "report_title": "",
-                    "final_report_html": "",
-                    "final_report_summary": "",
-                    "final_report_chart_bindings": [],
-                    "report_meta": {},
-                })
-
-                # Emit final metadata
-                yield json.dumps({
-                    "type": "iteration_complete",
-                    "data": {
-                        "iteration_id": iteration_id,
-                        "session_id": session_id,
-                        "proposal_id": proposal_id,
-                        "result_count": len(exec_result["rows"]),
-                    },
-                }, ensure_ascii=False) + "\n"
+                    "proposal_id": proposal_id,
+                    "result_count": len(result_rows),
+                    "rounds_completed": len(loop_rounds),
+                    "stop_reason": stop_reason,
+                },
+            }, ensure_ascii=False) + "\n"
 
         except RuntimeError as exc:
             localized_error = _localize_html_bundle_runtime_error(str(exc))
@@ -952,18 +1514,37 @@ def auto_analyze(req: AutoAnalyzeRequest, user: User = Depends(get_current_user)
     business_knowledge = _collect_business_knowledge(sandbox, req.sandbox_id, list(session.get("patches", [])))
 
     def stream_generator():
-        loop_rounds: list[dict] = []
-        loop_history = list(historical_iterations)
-        stop_reason = "model_stopped_using_tools"
-        report_bundle: dict = {}
-        direct_report_md = ""
         try:
-            for round_index in range(1, req.max_rounds + 1):
-                round_message = _build_iteration_message(
-                    original_message=message,
-                    round_index=round_index,
-                    previous_round=loop_rounds[-1] if loop_rounds else None,
-                )
+            round_iter = _iter_notebook_rounds(
+                message=message,
+                analysis_sandbox=analysis_sandbox,
+                sandbox=sandbox,
+                session_id=session_id,
+                sandbox_id=req.sandbox_id,
+                selected_tables=selected_tables,
+                selected_files=selected_files,
+                iteration_history=historical_iterations,
+                business_knowledge=business_knowledge,
+                provider=req.provider,
+                model=req.model,
+                max_rounds=req.max_rounds,
+                mode="auto",
+            )
+
+            loop_rounds: list[dict] = []
+            stop_reason = "model_stopped_using_tools"
+            direct_report_md = ""
+            while True:
+                try:
+                    round_payload = next(round_iter)
+                    loop_rounds.append(round_payload)
+                except StopIteration as stop:
+                    stop_value = stop.value if isinstance(stop.value, dict) else {}
+                    stop_reason = str(stop_value.get("stop_reason", stop_reason) or stop_reason)
+                    direct_report_md = str(stop_value.get("direct_report_md", "") or "")
+                    break
+
+                round_index = int(round_payload.get("round", 0) or 0)
                 yield json.dumps({
                     "type": "loop_status",
                     "data": {
@@ -976,112 +1557,16 @@ def auto_analyze(req: AutoAnalyzeRequest, user: User = Depends(get_current_user)
                         ),
                     },
                 }, ensure_ascii=False) + "\n"
-
-                accumulated_thought = ""
-                result_data = None
-                for event in run_analysis_iteration(
-                    message=round_message,
-                    sandbox=analysis_sandbox,
-                    iteration_history=loop_history,
-                    business_knowledge=business_knowledge,
-                    provider=req.provider,
-                    model=req.model,
-                ):
-                    if event.get("type") == "thought":
-                        accumulated_thought += event.get("content", "")
-                        yield json.dumps({
-                            "type": "loop_status",
-                            "data": {
-                                "round": round_index,
-                                "phase": "thinking",
-                                "message": accumulated_thought,
-                            },
-                        }, ensure_ascii=False) + "\n"
-                    elif event.get("type") == "result":
-                        result_data = event.get("data")
-
-                if result_data is None:
-                    raise RuntimeError("auto analysis round returned no result")
-
-                execution_result = {"rows": [], "tables": [], "chart_specs": [], "step_results": []}
-                has_tool_calls = bool(result_data.get("steps"))
-                direct_report_md = str(result_data.get("direct_report", "") or "").strip()
-                if not has_tool_calls and round_index == 1 and not direct_report_md:
-                    bootstrap_steps = _build_bootstrap_auto_steps(selected_tables, selected_files)
-                    if bootstrap_steps:
-                        result_data = {
-                            **result_data,
-                            "steps": bootstrap_steps,
-                            "tools_used": ["execute_select_sql"] if any(s.get("tool") == "sql" for s in bootstrap_steps) else ["python_interpreter"],
-                            "explanation": "system bootstrap: first round had no tool plan; injected exploration steps",
-                        }
-                        has_tool_calls = True
-                if has_tool_calls:
-                    execution_result = _execute_analysis_steps(
-                        result_data=result_data,
-                        sandbox=sandbox,
-                        selected_tables=selected_tables,
-                        selected_files=selected_files,
-                        sandbox_id=req.sandbox_id,
-                    )
-                elif _is_json_parse_failure_result(result_data):
-                    result_data = {
-                        **result_data,
-                        "conclusions": [],
-                        "hypotheses": [],
-                        "action_items": [],
-                        "explanation": "model stopped without additional tool calls",
-                    }
-
-                round_payload = {
-                    "round": round_index,
-                    "prompt": round_message,
-                    "thought": accumulated_thought,
-                    "result": result_data,
-                    "execution": execution_result,
-                    "error": execution_result.get("error"),
-                }
-                loop_rounds.append(round_payload)
-                loop_history.append(_build_auto_history_entry(round_payload))
-
-                yield json.dumps({
-                    "type": "loop_round",
-                    "data": round_payload,
-                }, ensure_ascii=False) + "\n"
-
-                if execution_result.get("error"):
-                    stop_reason = "execution_error"
-                    break
-                if not has_tool_calls:
-                    stop_reason = "model_stopped_using_tools"
+                if round_payload.get("thought"):
                     yield json.dumps({
                         "type": "loop_status",
                         "data": {
                             "round": round_index,
-                            "phase": "report_generating",
-                            "message": (
-                                "final report is being generated"
-                                if get_lang() == "en"
-                                else "正在生成最终报告"
-                            ),
+                            "phase": "thinking",
+                            "message": round_payload.get("thought", ""),
                         },
                     }, ensure_ascii=False) + "\n"
-                    break
-                if round_index >= req.max_rounds:
-                    stop_reason = "max_rounds_reached"
-                    yield json.dumps({
-                        "type": "loop_status",
-                        "data": {
-                            "round": round_index,
-                            "phase": "report_generating",
-                            "message": (
-                                "final report is being generated"
-                                if get_lang() == "en"
-                                else "正在生成最终报告"
-                            ),
-                        },
-                    }, ensure_ascii=False) + "\n"
-                    break
+                yield json.dumps({"type": "loop_round", "data": round_payload}, ensure_ascii=False) + "\n"
 
             chart_specs = _collect_all_charts(loop_rounds)
             report_bundle = generate_auto_analysis_report_bundle(
@@ -1100,20 +1585,6 @@ def auto_analyze(req: AutoAnalyzeRequest, user: User = Depends(get_current_user)
             if direct_report_md:
                 report_bundle["legacy_markdown"] = direct_report_md
                 report_bundle["summary"] = direct_report_md[:500]
-            if not report_bundle.get("legacy_markdown"):
-                report_bundle["legacy_markdown"] = generate_auto_analysis_report(
-                    message=message,
-                    loop_rounds=loop_rounds,
-                    business_knowledge=business_knowledge,
-                    stop_reason=stop_reason,
-                    provider=req.provider,
-                    model=req.model,
-                )
-            if not report_bundle.get("html_document"):
-                report_bundle = _build_report_bundle_from_markdown(
-                    report_bundle.get("legacy_markdown", ""),
-                    chart_specs,
-                )
             report_bundle = _normalize_auto_report_bundle(report_bundle, chart_specs)
             yield json.dumps({
                 "type": "report",
@@ -1121,6 +1592,9 @@ def auto_analyze(req: AutoAnalyzeRequest, user: User = Depends(get_current_user)
                     "title": report_bundle.get("title", "Auto Analysis Report"),
                     "summary": report_bundle.get("summary", ""),
                     "markdown": report_bundle.get("legacy_markdown", ""),
+                    "conclusions": report_bundle.get("conclusions", []),
+                    "chart_bindings": report_bundle.get("chart_bindings", []),
+                    "html_document": report_bundle.get("html_document", ""),
                     "stop_reason": stop_reason,
                     "rounds_completed": len(loop_rounds),
                 },
@@ -1257,6 +1731,7 @@ def delete_session(session_id: str, user: User = Depends(get_current_user)):
     ok = store.delete_session(user.user_id, session_id)
     if not ok:
         raise HTTPException(status_code=404, detail=t("error_session_not_found"))
+    destroy_kernel(session_id)
     return {"deleted": session_id}
 
 
@@ -1694,99 +2169,127 @@ def save_sandbox_tables(
 import pandas as pd
 from sqlalchemy import text
 
+
 def _query_rows(sql: str, sandbox_id: str | None = None) -> pd.DataFrame:
     """Execute SQL and return a DataFrame. Preserves aliases naturally."""
     if sandbox_id:
         engine = store.get_sandbox_engine(sandbox_id)
         if engine is not None:
-            # External engine
             return pd.read_sql(sql, engine)
-    
-    # Internal context
     return pd.read_sql(sql, store.conn)
 
 
-def _auto_execute(result_data: dict, allowed_tables: list[str], upload_rows: dict[str, list[dict]], upload_paths: dict[str, str], sandbox_id: str | None = None) -> dict:
-    """
-    Seamless execution engine (notebook-like):
-    - Shared namespace across all steps.
-    - Fail-fast: stop on first error.
-    - Implicit dfN binding.
-    """
+def _execute_analysis_steps(
+    result_data: dict,
+    sandbox: dict,
+    selected_tables: list[str],
+    selected_files: list[str] | None,
+    sandbox_id: str,
+    *,
+    session_id: str,
+) -> dict:
+    kernel = create_kernel(
+        session_id=session_id,
+        sandbox_id=sandbox_id,
+        selected_tables=selected_tables,
+        selected_files=selected_files or [],
+    )
+    all_uploads = sandbox.get("uploads", {})
+    all_upload_paths = sandbox.get("upload_paths", {})
+    if selected_files is not None:
+        allowed_uploads = {k: v for k, v in all_uploads.items() if k in selected_files}
+        allowed_upload_paths = {k: v for k, v in all_upload_paths.items() if k in selected_files}
+    else:
+        allowed_uploads = all_uploads
+        allowed_upload_paths = all_upload_paths
+
     steps = result_data.get("steps", [])
     if not isinstance(steps, list):
         steps = []
 
-    shared_namespace: dict = {}
     step_results: list[dict] = []
     all_rows: list[dict] = []
     all_tables: list[str] = []
     all_chart_specs: list[dict] = []
+    exported_vars: dict[str, object] = {}
+    warnings: list[str] = []
 
     for i, step in enumerate(steps):
-        tool = step.get("tool", "").lower()
-        code = step.get("code", "").strip()
+        tool = str(step.get("tool", "")).strip().lower()
+        source = str(step.get("source", "main") or "main").strip().lower()
+        code = str(step.get("code", "")).strip()
         if not code:
             step_results.append({"rows": [], "tables": [], "error": t("error_empty_code", default="空代码")})
             continue
-
         if tool == "sql":
             try:
-                # Use a wrapper that returns DataFrame
-                def df_query_executor(s):
-                    return _query_rows(s, sandbox_id).to_dict(orient="records")
-
-                rows, used_tables = execute_select_sql_with_mask(
-                    sql=code,
-                    allowed_tables=allowed_tables,
-                    query_executor=df_query_executor,
+                sql_result = kernel.run_sql_cell(
+                    step_index=len(step_results),
+                    code=code,
+                    source=source,
+                    main_query_df=lambda sql: _query_rows(sql, sandbox_id),
                 )
-                
-                step_results.append({"rows": rows, "tables": used_tables})
-                
-                # Bind to namespace as df{i} and df
-                step_df = pd.DataFrame(rows)
-                shared_namespace[f"df{i}"] = step_df
-                shared_namespace["df"] = step_df
-                
+                rows = sql_result.get("rows", [])
+                used_tables = sql_result.get("tables", [])
+                step_entry = {
+                    "rows": rows,
+                    "tables": used_tables,
+                    "source": source,
+                }
+                step_results.append(step_entry)
                 all_rows = rows
-                all_tables.extend(t for t in used_tables if t not in all_tables)
+                for table_name in used_tables:
+                    if table_name not in all_tables:
+                        all_tables.append(table_name)
             except Exception as exc:
-                error_msg = t("error_sql_failed", step=i+1, default=f"SQL 执行失败 (step {i+1})") + f": {str(exc)}"
-                step_results.append({"rows": [{"error": error_msg}], "tables": []})
-                return {"step_results": step_results, "error": error_msg}
-
+                error_msg = t("error_sql_failed", step=i + 1, default=f"SQL 执行失败 (step {i+1})") + f": {str(exc)}"
+                step_results.append({"rows": [{"error": error_msg}], "tables": [], "source": source})
+                return {"step_results": step_results, "error": error_msg, "rows": all_rows, "tables": all_tables, "chart_specs": all_chart_specs, "exported_vars": exported_vars}
         elif tool == "python":
             try:
-                def sql_tool(s: str) -> list[dict]:
-                    return _query_rows(s, sandbox_id).to_dict(orient="records")
-
-                python_result = run_python_pipeline(
-                    python_code=code,
-                    shared_namespace=shared_namespace,
-                    upload_rows=upload_rows,
-                    upload_paths=upload_paths,
-                    sql_tool=sql_tool,
+                python_result = kernel.run_python_cell(
+                    code=code,
+                    upload_rows=allowed_uploads,
+                    upload_paths=allowed_upload_paths,
+                    main_query_df=lambda sql: _query_rows(sql, sandbox_id),
                     step_results=step_results,
                 )
-                result_rows = python_result["rows"]
+                result_rows = python_result.get("rows", [])
                 result_charts = python_result.get("chart_specs", [])
                 result_warning = python_result.get("warning")
-
-                step_entry = {"rows": result_rows, "tables": all_tables, "chart_specs": result_charts}
+                python_exported_vars = python_result.get("exported_vars") or {}
+                if isinstance(python_exported_vars, dict):
+                    exported_vars.update(python_exported_vars)
+                step_entry = {
+                    "rows": result_rows,
+                    "tables": list(all_tables),
+                    "chart_specs": result_charts,
+                    "exported_vars": python_exported_vars if isinstance(python_exported_vars, dict) else {},
+                }
                 if result_warning:
                     step_entry["warning"] = result_warning
+                    warnings.append(str(result_warning))
                 step_results.append(step_entry)
                 all_rows = result_rows
                 all_chart_specs.extend(result_charts)
             except Exception as exc:
-                error_msg = t("error_python_failed", step=i+1, default=f"Python 执行失败 (step {i+1})") + f": {str(exc)}"
-                step_results.append({"rows": [{"error": error_msg}], "tables": all_tables})
-                return {"step_results": step_results, "error": error_msg}
+                error_msg = t("error_python_failed", step=i + 1, default=f"Python 执行失败 (step {i+1})") + f": {str(exc)}"
+                step_results.append({"rows": [{"error": error_msg}], "tables": list(all_tables)})
+                return {"step_results": step_results, "error": error_msg, "rows": all_rows, "tables": all_tables, "chart_specs": all_chart_specs, "exported_vars": exported_vars, "warnings": warnings}
         else:
             step_results.append({"rows": [], "tables": [], "error": t("error_unknown_tool", tool=tool, default=f"未知工具: {tool}")})
 
-    return {"rows": all_rows, "tables": all_tables, "chart_specs": all_chart_specs, "step_results": step_results}
+    from app.utils import sanitize_for_json
+
+    return sanitize_for_json({
+        "rows": all_rows,
+        "tables": all_tables,
+        "chart_specs": all_chart_specs,
+        "step_results": step_results,
+        "exported_vars": exported_vars,
+        "warnings": warnings,
+        "kernel_snapshot": kernel.snapshot(),
+    })
 
 
 def _resolve_selected_tables(requested_tables: list[str] | None, sandbox: dict, user: User, max_selected_tables: int) -> list[str]:

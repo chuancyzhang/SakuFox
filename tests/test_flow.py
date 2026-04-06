@@ -192,6 +192,231 @@ def test_mount_unknown_skill_returns_400():
     assert "Skills not found" in res.json()["detail"]
 
 
+def test_iterate_uses_post_execution_synthesis(monkeypatch):
+    headers = _login_admin()
+    captured = {"saw_rows": False}
+
+    def fake_run_analysis_iteration(*, message, sandbox, iteration_history, business_knowledge, provider=None, model=None):
+        yield {
+            "type": "result",
+            "data": {
+                "steps": [
+                    {
+                        "tool": "sql",
+                        "code": "SELECT department, SUM(cost) AS total_cost FROM tutorial_flights GROUP BY department ORDER BY total_cost DESC LIMIT 3",
+                    }
+                ],
+                "tools_used": ["execute_select_sql"],
+                "conclusions": [{"text": "planner conclusion should be replaced", "confidence": 0.2}],
+                "hypotheses": [],
+                "action_items": [],
+                "direct_answer": "planner answer should be replaced",
+                "explanation": "planner only",
+                "goal": "find highest cost department",
+                "observation_focus": "",
+                "continue_reason": "",
+                "stop_if": "",
+                "finalize": False,
+            },
+        }
+
+    def fake_synthesize_iteration_result(*, message, sandbox, iteration_history, business_knowledge, planned_result, execution_result, incremental=True, provider=None, model=None):
+        rows = execution_result.get("rows") or []
+        assert rows
+        captured["saw_rows"] = True
+        top_department = rows[0]["department"]
+        return {
+            "steps": [],
+            "tools_used": [],
+            "conclusions": [{"text": f"{top_department} 成本最高", "confidence": 1.0}],
+            "hypotheses": [],
+            "action_items": [f"继续分析 {top_department} 的成本驱动因素"],
+            "direct_answer": f"成本最高的部门是 {top_department}",
+            "explanation": "post execution synthesis",
+            "final_report_outline": [],
+            "direct_report": "",
+            "goal": planned_result.get("goal", ""),
+            "observation_focus": "",
+            "continue_reason": "",
+            "stop_if": "",
+            "finalize": True,
+        }
+
+    monkeypatch.setattr(main_module, "run_analysis_iteration", fake_run_analysis_iteration)
+    monkeypatch.setattr(main_module, "synthesize_iteration_result", fake_synthesize_iteration_result)
+
+    res = client.post(
+        "/api/chat/iterate",
+        headers=headers,
+        json={
+            "sandbox_id": "sb_flights_overview",
+            "message": "哪个部门成本最高",
+            "provider": "openai",
+        },
+    )
+    assert res.status_code == 200
+    events = _parse_ndjson_events(res.text)
+    result_events = [event for event in events if event["type"] == "result"]
+    assert result_events
+    final_result = result_events[-1]["data"]
+    assert captured["saw_rows"] is True
+    assert "planner answer should be replaced" not in json.dumps(final_result, ensure_ascii=False)
+    assert "成本最高的部门是" in final_result["direct_answer"]
+    assert final_result["conclusions"][0]["text"].endswith("成本最高")
+
+
+def test_auto_analyze_stops_on_repeated_warning_loop(monkeypatch):
+    headers = _login_admin()
+    call_state = {"count": 0}
+
+    def fake_run_analysis_iteration(*, message, sandbox, iteration_history, business_knowledge, provider=None, model=None):
+        call_state["count"] += 1
+        yield {
+            "type": "result",
+            "data": {
+                "steps": [{"tool": "python", "code": "final_df = df0[['avg_cost']]"}],
+                "tools_used": ["python_interpreter"],
+                "conclusions": [],
+                "hypotheses": [],
+                "action_items": [],
+                "direct_answer": "",
+                "explanation": "planner",
+                "goal": "inspect avg_cost",
+                "observation_focus": "",
+                "continue_reason": "",
+                "stop_if": "",
+                "finalize": False,
+            },
+        }
+
+    def fake_execute_analysis_steps(*, result_data, sandbox, selected_tables, selected_files, sandbox_id, session_id):
+        return {
+            "rows": [],
+            "tables": ["tutorial_flights"],
+            "chart_specs": [],
+            "step_results": [
+                {
+                    "rows": [],
+                    "tables": ["tutorial_flights"],
+                    "warning": "字段 avg_cost 不存在，当前仅有 department, destination_region, trip_count, total_cost",
+                }
+            ],
+            "warnings": ["字段 avg_cost 不存在，当前仅有 department, destination_region, trip_count, total_cost"],
+        }
+
+    def fake_synthesize_iteration_result(*, message, sandbox, iteration_history, business_knowledge, planned_result, execution_result, incremental=True, provider=None, model=None):
+        return {
+            "steps": [],
+            "tools_used": [],
+            "conclusions": [{"text": "Python 分析访问 avg_cost 字段失败", "confidence": 0.9}],
+            "hypotheses": [],
+            "action_items": ["修正字段映射"],
+            "direct_answer": "当前步骤失败，需要修正字段映射",
+            "explanation": "warning reflected",
+            "final_report_outline": [],
+            "direct_report": "",
+            "goal": planned_result.get("goal", ""),
+            "observation_focus": "",
+            "continue_reason": "",
+            "stop_if": "",
+            "finalize": False,
+        }
+
+    monkeypatch.setattr(main_module, "run_analysis_iteration", fake_run_analysis_iteration)
+    monkeypatch.setattr(main_module, "_execute_analysis_steps", fake_execute_analysis_steps)
+    monkeypatch.setattr(main_module, "synthesize_iteration_result", fake_synthesize_iteration_result)
+
+    res = client.post(
+        "/api/chat/auto-analyze",
+        headers=headers,
+        json={
+            "sandbox_id": "sb_flights_overview",
+            "message": "自动分析成本问题",
+            "provider": "openai",
+        },
+    )
+    assert res.status_code == 200
+    events = _parse_ndjson_events(res.text)
+    complete_event = next(event for event in events if event["type"] == "analysis_complete")
+    assert complete_event["data"]["stop_reason"] == "repeated_warning_loop"
+    assert call_state["count"] == 2
+
+
+def test_auto_analyze_converges_on_repeated_topic(monkeypatch):
+    headers = _login_admin()
+    call_state = {"count": 0}
+
+    def fake_run_analysis_iteration(*, message, sandbox, iteration_history, business_knowledge, provider=None, model=None):
+        call_state["count"] += 1
+        yield {
+            "type": "result",
+            "data": {
+                "steps": [
+                    {
+                        "tool": "sql",
+                        "code": "SELECT route, SUM(cost) AS total_cost FROM tutorial_flights GROUP BY route ORDER BY total_cost DESC LIMIT 8",
+                    }
+                ],
+                "tools_used": ["execute_select_sql"],
+                "conclusions": [],
+                "hypotheses": [],
+                "action_items": [],
+                "direct_answer": "",
+                "explanation": "planner",
+                "goal": "review high-cost routes",
+                "observation_focus": "",
+                "continue_reason": "",
+                "stop_if": "",
+                "finalize": False,
+            },
+        }
+
+    def fake_execute_analysis_steps(*, result_data, sandbox, selected_tables, selected_files, sandbox_id, session_id):
+        return {
+            "rows": [{"route": "A-B", "total_cost": 1000 + call_state["count"]}],
+            "tables": ["tutorial_flights"],
+            "chart_specs": [],
+            "step_results": [{"rows": [{"route": "A-B", "total_cost": 1000 + call_state["count"]}], "tables": ["tutorial_flights"]}],
+        }
+
+    def fake_synthesize_iteration_result(*, message, sandbox, iteration_history, business_knowledge, planned_result, execution_result, incremental=True, provider=None, model=None):
+        return {
+            "steps": [],
+            "tools_used": [],
+            "conclusions": [{"text": f"销售部门TOP8航线成本对比确认，总成本约 {1000 + call_state['count']} 元", "confidence": 0.95}],
+            "hypotheses": [{"id": "h1", "text": "继续检查相同航线成本结构"}],
+            "action_items": ["继续审查这些航线"],
+            "direct_answer": "TOP8航线成本结构已确认",
+            "explanation": "same topic",
+            "final_report_outline": [],
+            "direct_report": "",
+            "goal": planned_result.get("goal", ""),
+            "observation_focus": "",
+            "continue_reason": "",
+            "stop_if": "",
+            "finalize": False,
+        }
+
+    monkeypatch.setattr(main_module, "run_analysis_iteration", fake_run_analysis_iteration)
+    monkeypatch.setattr(main_module, "_execute_analysis_steps", fake_execute_analysis_steps)
+    monkeypatch.setattr(main_module, "synthesize_iteration_result", fake_synthesize_iteration_result)
+
+    res = client.post(
+        "/api/chat/auto-analyze",
+        headers=headers,
+        json={
+            "sandbox_id": "sb_flights_overview",
+            "message": "自动分析成本问题",
+            "provider": "openai",
+        },
+    )
+    assert res.status_code == 200
+    events = _parse_ndjson_events(res.text)
+    complete_event = next(event for event in events if event["type"] == "analysis_complete")
+    assert complete_event["data"]["stop_reason"] == "repeated_topic"
+    assert call_state["count"] == 3
+
+
 def test_save_skill_persists_context_snapshot_metadata():
     headers = _login_admin()
 

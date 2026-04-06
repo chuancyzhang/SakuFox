@@ -469,10 +469,18 @@ def _build_iteration_user_prompt(
             "- Language requirement: keep JSON keys in English, and keep all narrative values in English "
             "(conclusions.text, hypotheses.text, action_items, explanation, final_report_outline)."
         )
+        parts.append(
+            "- Narrative fields must contain final concrete values. Never output unresolved placeholders, "
+            "Python variable names, or f-string fragments such as {top_dept}, {metric:.2f}, or {'key': value}."
+        )
     else:
         parts.append(
             "- 输出语言要求：JSON 字段名保持英文，但所有文本内容必须使用简体中文"
             "（包括 conclusions.text、hypotheses.text、action_items、explanation、final_report_outline）。"
+        )
+        parts.append(
+            "- 所有叙述字段都必须写成最终可读的具体值，绝不能输出未解析的占位符、Python 变量名、"
+            "f-string 片段或原始字典文本，例如 {top_dept}、{metric:.2f}、{'key': value}。"
         )
 
     return "\n".join(parts)
@@ -508,6 +516,99 @@ def _is_json_parse_failure_payload(parsed: dict) -> bool:
         if "json" in str(text).lower():
             return True
     return False
+
+
+def _normalize_iteration_payload(parsed: dict, *, include_steps: bool) -> dict:
+    steps = parsed.get("steps", [])
+    if not isinstance(steps, list):
+        steps = []
+
+    if include_steps and not steps:
+        sql = str(parsed.get("sql", "")).strip()
+        python_code = str(parsed.get("python_code", "")).strip()
+        if sql:
+            steps.append({"tool": "sql", "code": sql})
+        if python_code:
+            steps.append({"tool": "python", "code": python_code})
+
+    normalized_steps = []
+    if include_steps:
+        for step in steps:
+            if isinstance(step, dict) and step.get("tool") and step.get("code"):
+                tool = str(step["tool"]).strip().lower()
+                if tool in ("sql", "python"):
+                    normalized_steps.append({"tool": tool, "code": str(step["code"]).strip()})
+
+    tools_used = []
+    for step in normalized_steps:
+        tool_name = "execute_select_sql" if step["tool"] == "sql" else "python_interpreter"
+        if tool_name not in tools_used:
+            tools_used.append(tool_name)
+
+    conclusions = parsed.get("conclusions", [])
+    if not isinstance(conclusions, list):
+        conclusions = [{"text": str(conclusions), "confidence": 0.5}]
+    normalized_conclusions = []
+    for conclusion in conclusions:
+        if isinstance(conclusion, dict):
+            try:
+                confidence = float(conclusion.get("confidence", 0.5))
+            except (TypeError, ValueError):
+                confidence = 0.5
+            normalized_conclusions.append(
+                {
+                    "text": str(conclusion.get("text", "")),
+                    "confidence": confidence,
+                }
+            )
+        else:
+            normalized_conclusions.append({"text": str(conclusion), "confidence": 0.5})
+
+    hypotheses = parsed.get("hypotheses", [])
+    if not isinstance(hypotheses, list):
+        hypotheses = [{"id": "h1", "text": str(hypotheses)}]
+    normalized_hypotheses = []
+    for index, hypothesis in enumerate(hypotheses):
+        if isinstance(hypothesis, dict):
+            normalized_hypotheses.append(
+                {
+                    "id": str(hypothesis.get("id", f"h{index+1}")),
+                    "text": str(hypothesis.get("text", "")),
+                }
+            )
+        else:
+            normalized_hypotheses.append({"id": f"h{index+1}", "text": str(hypothesis)})
+
+    action_items = parsed.get("action_items", [])
+    if not isinstance(action_items, list):
+        action_items = [action_items] if action_items else []
+    action_items = [_stringify_action_item(item) for item in action_items]
+    action_items = [item for item in action_items if item]
+
+    final_report_outline = parsed.get("final_report_outline")
+    if isinstance(final_report_outline, list):
+        normalized_report_outline = [str(item).strip() for item in final_report_outline if str(item).strip()]
+    elif isinstance(final_report_outline, str) and final_report_outline.strip():
+        normalized_report_outline = [line.strip() for line in final_report_outline.splitlines() if line.strip()]
+    else:
+        normalized_report_outline = []
+
+    return {
+        "steps": normalized_steps if include_steps else [],
+        "tools_used": tools_used if include_steps else [],
+        "conclusions": normalized_conclusions,
+        "hypotheses": normalized_hypotheses,
+        "action_items": action_items,
+        "direct_answer": str(parsed.get("direct_answer", "") or "").strip(),
+        "explanation": str(parsed.get("explanation", "")) or t("agent_explanation_default"),
+        "final_report_outline": normalized_report_outline,
+        "direct_report": "",
+        "goal": str(parsed.get("goal", "") or "").strip(),
+        "observation_focus": str(parsed.get("observation_focus", "") or "").strip(),
+        "continue_reason": str(parsed.get("continue_reason", "") or "").strip(),
+        "stop_if": str(parsed.get("stop_if", "") or "").strip(),
+        "finalize": bool(parsed.get("finalize", False)),
+    }
 
 
 def _describe_database_type(sandbox: dict) -> str:
@@ -616,163 +717,11 @@ def _run_iteration_by_llm(
 
 
 
-    # ── Extract steps (new multi-step format) ─────────────────────────
-
-    steps = parsed.get("steps", [])
-
-    if not isinstance(steps, list):
-
-        steps = []
-
-
-
-    # Backward compatibility: if no steps, build from flat sql/python_code
-
-    if not steps:
-
-        sql = str(parsed.get("sql", "")).strip()
-
-        python_code = str(parsed.get("python_code", "")).strip()
-
-        if sql:
-
-            steps.append({"tool": "sql", "code": sql})
-
-        if python_code:
-
-            steps.append({"tool": "python", "code": python_code})
-
-
-
-    # Normalize each step
-
-    normalized_steps = []
-
-    for s in steps:
-
-        if isinstance(s, dict) and s.get("tool") and s.get("code"):
-
-            tool = str(s["tool"]).strip().lower()
-
-            if tool in ("sql", "python"):
-
-                normalized_steps.append({"tool": tool, "code": str(s["code"]).strip()})
-
-
-
-    # Infer tools_used from steps
-
-    tools_used = []
-
-    for s in normalized_steps:
-
-        tool_name = "execute_select_sql" if s["tool"] == "sql" else "python_interpreter"
-
-        if tool_name not in tools_used:
-
-            tools_used.append(tool_name)
-
-
-
-    conclusions = parsed.get("conclusions", [])
-
-    if not isinstance(conclusions, list):
-
-        conclusions = [{"text": str(conclusions), "confidence": 0.5}]
-
-    # Normalize conclusion format
-
-    normalized_conclusions = []
-
-    for c in conclusions:
-
-        if isinstance(c, dict):
-
-            normalized_conclusions.append({
-
-                "text": str(c.get("text", "")),
-
-                "confidence": float(c.get("confidence", 0.5)),
-
-            })
-
-        else:
-
-            normalized_conclusions.append({"text": str(c), "confidence": 0.5})
-
-
-
-    hypotheses = parsed.get("hypotheses", [])
-
-    if not isinstance(hypotheses, list):
-
-        hypotheses = [{"id": "h1", "text": str(hypotheses)}]
-
-    normalized_hypotheses = []
-
-    for i, h in enumerate(hypotheses):
-
-        if isinstance(h, dict):
-
-            normalized_hypotheses.append({
-
-                "id": str(h.get("id", f"h{i+1}")),
-
-                "text": str(h.get("text", "")),
-
-            })
-
-        else:
-
-            normalized_hypotheses.append({"id": f"h{i+1}", "text": str(h)})
-
-
-
-    action_items = parsed.get("action_items", [])
-
-    if not isinstance(action_items, list):
-
-        action_items = [str(action_items)] if action_items else []
-
-    action_items = [str(a) for a in action_items if str(a).strip()]
-
-    final_report_outline = parsed.get("final_report_outline")
-    if isinstance(final_report_outline, list):
-        normalized_report_outline = [str(item).strip() for item in final_report_outline if str(item).strip()]
-    elif isinstance(final_report_outline, str) and final_report_outline.strip():
-        normalized_report_outline = [line.strip() for line in final_report_outline.splitlines() if line.strip()]
-    else:
-        normalized_report_outline = []
-
-
-
-    explanation = str(parsed.get("explanation", "")) or t("agent_explanation_default")
-
-
-
     yield {
 
         "type": "result",
 
-        "data": {
-
-            "steps": normalized_steps,
-
-            "tools_used": tools_used,
-
-            "conclusions": normalized_conclusions,
-
-            "hypotheses": normalized_hypotheses,
-
-            "action_items": action_items,
-
-            "explanation": explanation,
-
-            "final_report_outline": normalized_report_outline,
-
-            "direct_report": "",
-
-        },
+        "data": _normalize_iteration_payload(parsed, include_steps=True),
 
     }
 
@@ -826,11 +775,23 @@ def _run_iteration_by_rules(message: str, sandbox: dict) -> Generator[dict, None
 
             "action_items": [t("agent_fallback_item_1")],
 
+            "direct_answer": t("agent_fallback_conclusion", table=table),
+
             "explanation": t("agent_explanation_mock"),
 
             "final_report_outline": [],
 
             "direct_report": "",
+
+            "goal": "",
+
+            "observation_focus": "",
+
+            "continue_reason": "",
+
+            "stop_if": "",
+
+            "finalize": False,
 
         },
 
@@ -838,6 +799,160 @@ def _run_iteration_by_rules(message: str, sandbox: dict) -> Generator[dict, None
 
 
 
+
+
+def _summarize_execution_for_reflection(execution_result: dict) -> str:
+    rows = execution_result.get("rows") or []
+    chart_specs = execution_result.get("chart_specs") or []
+    step_results = execution_result.get("step_results") or []
+    exported_vars = execution_result.get("exported_vars") or {}
+    lines = [
+        f"rows_count={len(rows)}",
+        f"charts_count={len(chart_specs)}",
+    ]
+    if execution_result.get("error"):
+        lines.append(f"execution_error={execution_result.get('error')}")
+    if isinstance(exported_vars, dict) and exported_vars:
+        lines.append(f"exported_vars={json.dumps(exported_vars, ensure_ascii=False)}")
+    if rows:
+        lines.append(f"rows_preview={json.dumps(rows[:8], ensure_ascii=False)}")
+    if chart_specs:
+        chart_preview = []
+        for spec in chart_specs[:6]:
+            if not isinstance(spec, dict):
+                continue
+            chart_preview.append(
+                {
+                    "title": spec.get("title") or spec.get("chart_title") or "",
+                    "type": spec.get("type") or spec.get("chart_type") or "",
+                    "x": spec.get("x") or spec.get("x_field") or "",
+                    "y": spec.get("y") or spec.get("y_field") or "",
+                }
+            )
+        if chart_preview:
+            lines.append(f"chart_preview={json.dumps(chart_preview, ensure_ascii=False)}")
+    if step_results:
+        compact_steps = []
+        for index, step_result in enumerate(step_results[:10], start=1):
+            if not isinstance(step_result, dict):
+                continue
+            compact_steps.append(
+                {
+                    "step": index,
+                    "rows_count": len(step_result.get("rows") or []),
+                    "tables": step_result.get("tables") or [],
+                    "warning": step_result.get("warning") or step_result.get("error") or "",
+                }
+            )
+        if compact_steps:
+            lines.append(f"step_results={json.dumps(compact_steps, ensure_ascii=False)}")
+    return "\n".join(lines)
+
+
+def synthesize_iteration_result(
+    *,
+    message: str,
+    sandbox: dict,
+    iteration_history: list[dict],
+    business_knowledge: list[str],
+    planned_result: dict,
+    execution_result: dict,
+    incremental: bool = True,
+    provider: str | None = None,
+    model: str | None = None,
+) -> dict:
+    config = load_config()
+    selected_provider = (provider or config.llm_provider).lower()
+    if selected_provider not in {"openai", "anthropic"}:
+        return {
+            "steps": [],
+            "tools_used": [],
+            "conclusions": planned_result.get("conclusions", []),
+            "hypotheses": planned_result.get("hypotheses", []),
+            "action_items": planned_result.get("action_items", []),
+            "direct_answer": planned_result.get("direct_answer", ""),
+            "explanation": planned_result.get("explanation", ""),
+            "final_report_outline": planned_result.get("final_report_outline", []),
+            "direct_report": "",
+            "goal": planned_result.get("goal", ""),
+            "observation_focus": planned_result.get("observation_focus", ""),
+            "continue_reason": planned_result.get("continue_reason", ""),
+            "stop_if": planned_result.get("stop_if", ""),
+            "finalize": planned_result.get("finalize", False),
+        }
+
+    is_en = get_lang() == "en"
+    report_language = "English" if is_en else "简体中文"
+    history_preview = []
+    known_findings: list[str] = []
+    for item in iteration_history[-3:]:
+        history_preview.append(
+            {
+                "iteration_id": item.get("iteration_id"),
+                "message": item.get("message"),
+                "conclusions": item.get("conclusions", [])[:3],
+            }
+        )
+        for conclusion in item.get("conclusions", [])[:5]:
+            if isinstance(conclusion, dict):
+                text = str(conclusion.get("text", "")).strip()
+            else:
+                text = str(conclusion).strip()
+            if text and text not in known_findings:
+                known_findings.append(text)
+    system_prompt = (
+        "You are a senior notebook analysis summarizer. "
+        "You analyze executed SQL/Python evidence after the tool run is complete. "
+        "Never generate SQL, Python, steps, or tool plans in this stage. "
+        "Only produce conclusions that are directly supported by the provided execution evidence. "
+        "Prefer convergence over repetition: once a finding is already known, either explore a genuinely new dimension or finalize."
+    )
+    user_prompt = (
+        f"User request:\n{message}\n\n"
+        f"Business knowledge:\n{json.dumps(business_knowledge[:20], ensure_ascii=False)}\n\n"
+        f"Recent history:\n{json.dumps(history_preview, ensure_ascii=False)}\n\n"
+        f"Known findings from previous rounds (do not restate unless directly updated by new evidence):\n{json.dumps(known_findings[:12], ensure_ascii=False)}\n\n"
+        f"Planner metadata:\n{json.dumps({'goal': planned_result.get('goal', ''), 'observation_focus': planned_result.get('observation_focus', ''), 'continue_reason': planned_result.get('continue_reason', ''), 'stop_if': planned_result.get('stop_if', ''), 'finalize': planned_result.get('finalize', False)}, ensure_ascii=False)}\n\n"
+        f"Executed steps:\n{json.dumps(planned_result.get('steps', []), ensure_ascii=False)}\n\n"
+        f"Execution evidence:\n{_summarize_execution_for_reflection(execution_result)}\n\n"
+        f"Available sandbox tables:\n{json.dumps(sandbox.get('tables', [])[:20], ensure_ascii=False)}\n\n"
+        f"Write all narrative values in {report_language}.\n"
+        "Return JSON only with this schema:\n"
+        "- steps: []\n"
+        "- tools_used: []\n"
+        "- direct_answer: a concise answer grounded in the execution result\n"
+        "- conclusions: array of {\"text\": \"...\", \"confidence\": 0-1}\n"
+        "- hypotheses: array of {\"id\": \"...\", \"text\": \"...\"}\n"
+        "- action_items: array of readable strings\n"
+        "- explanation: short evidence-based explanation\n"
+        "- final_report_outline: array of short strings\n"
+        "- goal, observation_focus, continue_reason, stop_if: short strings\n"
+        "- finalize: boolean\n"
+        "Rules:\n"
+        "- Do not output SQL, Python, or any code.\n"
+        "- Do not invent facts not present in the evidence.\n"
+        "- Never output placeholders or unresolved variables like {x}.\n"
+        + (
+            "- This is an incremental exploration round. Output only newly discovered findings from this round's execution evidence. Do not restate prior findings unless the new evidence changes, invalidates, or sharpens them.\n"
+            "- If this round only confirms old findings and adds nothing new, keep conclusions/hypotheses/action_items minimal.\n"
+            "- If two or more recent rounds have already covered the same metric/entity/route/topic, set finalize=true unless this round adds a clearly new dimension.\n"
+            if incremental
+            else "- This is the final synthesis stage. You may combine findings across rounds into a complete final answer.\n"
+        )
+    )
+    chunks = (
+        _call_openai_protocol(system_prompt=system_prompt, user_prompt=user_prompt, model=model, config=config)
+        if selected_provider == "openai"
+        else _call_anthropic_protocol(system_prompt=system_prompt, user_prompt=user_prompt, model=model, config=config)
+    )
+    parsed = _parse_bundle_json("".join(chunks))
+    normalized = _normalize_iteration_payload(parsed, include_steps=False)
+    normalized["goal"] = normalized.get("goal") or planned_result.get("goal", "")
+    normalized["observation_focus"] = normalized.get("observation_focus") or planned_result.get("observation_focus", "")
+    normalized["continue_reason"] = normalized.get("continue_reason") or planned_result.get("continue_reason", "")
+    normalized["stop_if"] = normalized.get("stop_if") or planned_result.get("stop_if", "")
+    normalized["finalize"] = bool(parsed.get("finalize", planned_result.get("finalize", False)))
+    return normalized
 
 
 # ── LLM protocol implementations (unchanged) ─────────────────────────
@@ -947,9 +1062,8 @@ def generate_auto_analysis_report_bundle(
 
     config = load_config()
     selected_provider = (provider or config.llm_provider).lower()
-    if selected_provider not in {"openai", "anthropic"}:
-        return fallback_bundle
-
+    summary_rounds = _build_loop_rounds_summary(loop_rounds)
+    rows_preview = json.dumps(final_result_rows[:20], ensure_ascii=False)
     knowledge_block = "\n".join(f"- {item}" for item in business_knowledge[:30]) or "- N/A"
     patches_block = "\n".join(f"- {item}" for item in session_patches[:20]) or "- N/A"
     history_lines: list[str] = []
@@ -963,8 +1077,6 @@ def generate_auto_analysis_report_bundle(
             entry += f" | summary={report_summary[:220]}"
         history_lines.append(entry)
     history_block = "\n".join(history_lines) or "- N/A"
-    rounds_summary = _build_loop_rounds_summary(loop_rounds)
-    rows_preview = json.dumps(final_result_rows[:20], ensure_ascii=False)
     chart_ids = [f"chart_{idx}" for idx, spec in enumerate(chart_specs[:20], start=1) if isinstance(spec, dict)]
     chart_hint = ", ".join(chart_ids) if chart_ids else "none"
     required_chart_count = min(3, len(chart_ids))
@@ -974,191 +1086,184 @@ def generate_auto_analysis_report_bundle(
         if isinstance(spec, dict)
     ]
 
-    system_prompt = (
-        "You are a principal analytics writer. Produce a complete report bundle in JSON. "
-        "The html_document must be a full standalone HTML document and may include CSS but no JavaScript."
+    def _merge_loop_items(key: str, unique_key: str | None = None) -> list:
+        output: list = []
+        seen: set[str] = set()
+        for round_payload in loop_rounds:
+            for item in (round_payload.get("result") or {}).get(key, []):
+                if unique_key and isinstance(item, dict):
+                    marker = str(item.get(unique_key, "")).strip()
+                else:
+                    marker = json.dumps(item, ensure_ascii=False, sort_keys=True) if isinstance(item, (dict, list)) else str(item)
+                if marker and marker not in seen:
+                    seen.add(marker)
+                    output.append(item)
+        return output
+
+    def _extract_conclusions(value: dict) -> list[dict]:
+        conclusions = value.get("conclusions", [])
+        if not isinstance(conclusions, list):
+            conclusions = [{"text": str(conclusions), "confidence": 0.5}]
+        normalized: list[dict] = []
+        for item in conclusions:
+            if isinstance(item, dict):
+                normalized.append(
+                    {
+                        "text": str(item.get("text", "")).strip(),
+                        "confidence": float(item.get("confidence", 0.5)),
+                    }
+                )
+            else:
+                normalized.append({"text": str(item), "confidence": 0.5})
+        return [item for item in normalized if item["text"]]
+
+    def _extract_action_items(value: dict) -> list[str]:
+        items = value.get("action_items", [])
+        if not isinstance(items, list):
+            items = [str(items)] if items else []
+        return [str(item).strip() for item in items if str(item).strip()]
+
+    if selected_provider not in {"openai", "anthropic"}:
+        fallback_bundle["conclusions"] = _extract_conclusions({"conclusions": _merge_loop_items("conclusions", unique_key="text")})
+        fallback_bundle["action_items"] = _extract_action_items({"action_items": _merge_loop_items("action_items")})
+        return fallback_bundle
+
+    stage1_markdown = generate_auto_analysis_report(
+        message=message,
+        loop_rounds=loop_rounds,
+        business_knowledge=business_knowledge,
+        stop_reason=stop_reason,
+        provider=provider,
+        model=model,
+    ).strip()
+    if not stage1_markdown:
+        stage1_markdown = fallback_markdown
+
+    stage1_title = default_title
+    stage1_summary = (
+        _strip_markdown_to_plain_text(str(fallback_bundle.get("summary", "") or ""))
+        or _strip_markdown_to_plain_text(stage1_markdown)
+    )[:500]
+    stage1_bundle = {
+        "title": stage1_title,
+        "summary": stage1_summary,
+        "conclusions": _extract_conclusions({"conclusions": _merge_loop_items("conclusions", unique_key="text")}),
+        "action_items": _extract_action_items({"action_items": _merge_loop_items("action_items")}),
+        "legacy_markdown": stage1_markdown or fallback_markdown,
+    }
+    if not stage1_bundle["summary"]:
+        stage1_bundle["summary"] = str(fallback_bundle.get("summary", "") or "")
+    if not stage1_bundle["conclusions"]:
+        stage1_bundle["conclusions"] = _extract_conclusions({"conclusions": _merge_loop_items("conclusions", unique_key="text")})
+    if not stage1_bundle["action_items"]:
+        stage1_bundle["action_items"] = _extract_action_items({"action_items": _merge_loop_items("action_items")})
+
+    stage2_system_prompt = (
+        "You are a principal analytics web designer. Produce only JSON with chart_bindings and html_document. "
+        "The html_document must be a polished standalone HTML report, not markdown rendered as plain text."
     )
-    base_user_prompt = (
+    stage2_user_prompt = (
         "Return valid JSON only. No markdown fences.\n"
         "Schema:\n"
         "{"
-        "\"title\": string, "
-        "\"summary\": string, "
-        "\"html_document\": string, "
-        "\"chart_bindings\": [{\"chart_id\": string, \"option\": object, \"height\": number}]"
+        "\"chart_bindings\": [{\"chart_id\": string, \"option\": object, \"height\": number}], "
+        "\"html_document\": string"
         "}\n\n"
+        f"Report title:\n{stage1_bundle['title']}\n\n"
+        f"Report summary:\n{stage1_bundle['summary']}\n\n"
+        f"Conclusions:\n{json.dumps(stage1_bundle['conclusions'], ensure_ascii=False)}\n\n"
+        f"Action items:\n{json.dumps(stage1_bundle['action_items'], ensure_ascii=False)}\n\n"
         f"Original request:\n{message}\n\n"
         f"Stop reason: {stop_reason}\n"
         f"Rounds completed: {rounds_completed}\n\n"
         f"Business knowledge:\n{knowledge_block}\n\n"
         f"Session patches:\n{patches_block}\n\n"
         f"Session history summary:\n{history_block}\n\n"
-        f"Loop rounds:\n{rounds_summary}\n\n"
+        f"Loop rounds:\n{summary_rounds}\n\n"
         f"Final result rows preview:\n{rows_preview}\n\n"
         f"Output language requirement: {report_language}. Keep title/summary/body in this language.\n\n"
         "Chart mounting rule:\n"
         "- Place chart nodes in html_document with data-chart-id=\"...\".\n"
         f"- Available chart ids: {chart_hint}.\n"
         f"- REQUIRED: include at least {required_chart_count} chart placeholder nodes when chart ids are available.\n"
-        "- chart_bindings should map chart_id to ECharts option and height."
+        "- chart_bindings should map chart_id to ECharts option and height.\n\n"
+        "HTML quality requirements:\n"
+        "- Return a complete standalone HTML document with <!doctype html>, <html>, <head>, <style>, and <body>.\n"
+        "- Use polished CSS, cards, metric callouts, section dividers, and readable tables.\n"
+        "- Do NOT include raw Markdown syntax anywhere in visible text: no ## headings, no **bold**, no pipe tables like | a | b |, and no ``` fences.\n"
+        "- Convert any tabular content into real <table><thead><tbody> HTML.\n"
+        "- Prefer a visually rich executive report layout over a plain document."
     )
-    max_attempts = 3
-    last_reason = "unknown"
-    for attempt in range(1, max_attempts + 1):
-        retry_hint = ""
-        if attempt > 1:
-            retry_hint = (
-                "\n\nRetry instruction:\n"
-                "The previous output did not contain a qualified standalone HTML document.\n"
-                f"Failure reason: {last_reason}\n"
-                "Fix this and return valid JSON with html_document as a complete HTML page."
-            )
-        user_prompt = base_user_prompt + retry_hint
-        chunks = (
-            _call_openai_protocol(system_prompt=system_prompt, user_prompt=user_prompt, model=model, config=config)
-            if selected_provider == "openai"
-            else _call_anthropic_protocol(system_prompt=system_prompt, user_prompt=user_prompt, model=model, config=config)
-        )
-        raw = "".join(chunks).strip()
+    stage2_chunks = (
+        _call_openai_protocol(system_prompt=stage2_system_prompt, user_prompt=stage2_user_prompt, model=model, config=config)
+        if selected_provider == "openai"
+        else _call_anthropic_protocol(system_prompt=stage2_system_prompt, user_prompt=stage2_user_prompt, model=model, config=config)
+    )
+    stage2_raw = "".join(stage2_chunks).strip()
+    stage2_parsed = _parse_report_bundle_json(stage2_raw)
 
-        candidate_bundle: dict | None = None
-        ai_html_source = False
-        ai_html_for_validation = ""
+    combined_fallback = {
+        **fallback_bundle,
+        "title": stage1_bundle["title"],
+        "summary": stage1_bundle["summary"],
+        "conclusions": stage1_bundle["conclusions"],
+        "action_items": stage1_bundle["action_items"],
+        "legacy_markdown": fallback_markdown,
+    }
+    if not stage2_parsed:
+        return combined_fallback
 
-        direct_html = _extract_html_document(raw)
-        if direct_html:
-            ai_html_source = True
-            ai_html_for_validation = direct_html
-            html_document = _ensure_chart_placeholders(_sanitize_report_html(direct_html), default_chart_bindings)
-            candidate_bundle = {
-                "title": default_title,
-                "summary": fallback_markdown[:500],
-                "html_document": html_document,
-                "chart_bindings": default_chart_bindings,
-                "legacy_markdown": fallback_markdown,
-            }
-        else:
-            parsed = _parse_report_bundle_json(raw)
-            if not parsed:
-                repaired = _repair_report_bundle_json(
-                    raw_response=raw,
-                    fallback_markdown=fallback_markdown,
-                    provider=selected_provider,
-                    model=model,
-                    config=config,
-                    report_language=report_language,
-                )
-                parsed = _parse_report_bundle_json(repaired) if repaired else None
+    stage2_bundle = _normalize_report_bundle(stage2_parsed, combined_fallback, chart_specs)
+    stage2_bundle["title"] = stage1_bundle["title"]
+    stage2_bundle["summary"] = stage1_bundle["summary"]
+    stage2_bundle["conclusions"] = stage1_bundle["conclusions"]
+    stage2_bundle["action_items"] = stage1_bundle["action_items"]
+    stage2_bundle["legacy_markdown"] = fallback_markdown
+    if not stage2_bundle.get("chart_bindings"):
+        stage2_bundle["chart_bindings"] = default_chart_bindings
 
-            if not parsed:
-                llm_html = _generate_html_document_by_llm(
-                    fallback_markdown=fallback_markdown,
-                    chart_specs=chart_specs,
-                    provider=selected_provider,
-                    model=model,
-                    config=config,
-                    report_language=report_language,
-                )
-                if llm_html:
-                    ai_html_source = True
-                    ai_html_for_validation = llm_html
-                    html_document = _ensure_chart_placeholders(_sanitize_report_html(llm_html), default_chart_bindings)
-                    candidate_bundle = {
-                        "title": default_title,
-                        "summary": fallback_markdown[:500],
-                        "html_document": html_document,
-                        "chart_bindings": default_chart_bindings,
-                        "legacy_markdown": fallback_markdown,
-                    }
-            else:
-                normalized = _normalize_report_bundle(parsed, fallback_bundle, chart_specs)
-                raw_html_field = str(parsed.get("html_document", "") or "").strip()
-                extracted_nested_html = _extract_html_from_json_like_text(raw_html_field)
-                if extracted_nested_html:
-                    raw_html_field = extracted_nested_html
-                    normalized = _normalize_report_bundle(
-                        {**parsed, "html_document": raw_html_field},
-                        fallback_bundle,
-                        chart_specs,
-                    )
-                if _looks_like_json_text(raw_html_field):
-                    parsed_nested = _parse_report_bundle_json(raw_html_field)
-                    if parsed_nested and parsed_nested.get("html_document"):
-                        raw_html_field = str(parsed_nested.get("html_document", "") or "").strip()
-                        normalized = _normalize_report_bundle(
-                            {**parsed, "html_document": raw_html_field},
-                            fallback_bundle,
-                            chart_specs,
-                        )
-
-                if raw_html_field:
-                    ai_html_source = True
-                    ai_html_for_validation = raw_html_field
-
-                if _looks_like_markdown_text(raw_html_field):
-                    llm_html = _generate_html_document_by_llm(
-                        fallback_markdown=raw_html_field,
-                        chart_specs=chart_specs,
-                        provider=selected_provider,
-                        model=model,
-                        config=config,
-                        report_language=report_language,
-                    )
-                    if llm_html:
-                        ai_html_source = True
-                        ai_html_for_validation = llm_html
-                        normalized["html_document"] = _sanitize_report_html(llm_html)
-                    else:
-                        ai_html_source = False
-
-                normalized["html_document"] = _ensure_chart_placeholders(
-                    normalized.get("html_document", ""),
-                    normalized.get("chart_bindings", []) or [],
-                )
-                candidate_bundle = normalized
-
-        if ai_html_source and ai_html_for_validation and not _is_standalone_html_document(ai_html_for_validation):
-            upgraded_html = _generate_html_document_by_llm(
-                fallback_markdown=ai_html_for_validation,
+    required_chart_count = min(3, len(chart_ids))
+    stage2_ai_html = str(stage2_parsed.get("html_document", "") or "")
+    is_qualified = _is_standalone_html_document(stage2_ai_html)
+    if is_qualified and _html_contains_markdown_artifacts(stage2_ai_html):
+        is_qualified = False
+    if is_qualified and required_chart_count > 0:
+        placeholder_ids = set(re.findall(r'data-chart-id=["\']([^"\']+)["\']', stage2_ai_html, flags=re.IGNORECASE))
+        is_qualified = len(placeholder_ids) >= required_chart_count
+    if not is_qualified:
+        for _ in range(2):
+            repaired_html = _generate_html_document_by_llm(
+                fallback_markdown=stage1_bundle["legacy_markdown"],
                 chart_specs=chart_specs,
                 provider=selected_provider,
                 model=model,
                 config=config,
                 report_language=report_language,
             )
-            if upgraded_html:
-                bindings = []
-                if candidate_bundle and isinstance(candidate_bundle.get("chart_bindings"), list):
-                    bindings = candidate_bundle.get("chart_bindings") or []
-                if not bindings:
-                    bindings = default_chart_bindings
-                if candidate_bundle is None:
-                    candidate_bundle = {
-                        "title": default_title,
-                        "summary": fallback_markdown[:500],
-                        "legacy_markdown": fallback_markdown,
-                        "chart_bindings": bindings,
-                    }
-                candidate_bundle["chart_bindings"] = bindings
-                candidate_bundle["html_document"] = _ensure_chart_placeholders(
-                    _sanitize_report_html(upgraded_html),
-                    bindings,
+            if not repaired_html:
+                continue
+            stage2_bundle["html_document"] = repaired_html
+            is_qualified = _is_standalone_html_document(stage2_bundle.get("html_document", ""))
+            if is_qualified and _html_contains_markdown_artifacts(stage2_bundle.get("html_document", "")):
+                is_qualified = False
+            if is_qualified and required_chart_count > 0:
+                placeholder_ids = set(
+                    re.findall(
+                        r'data-chart-id=["\']([^"\']+)["\']',
+                        stage2_bundle.get("html_document", ""),
+                        flags=re.IGNORECASE,
+                    )
                 )
-                ai_html_for_validation = upgraded_html
+                is_qualified = len(placeholder_ids) >= required_chart_count
+            if is_qualified:
+                break
 
-        ok, reason = _is_qualified_ai_report_bundle(
-            candidate_bundle,
-            required_chart_count=required_chart_count,
-            require_ai_html_source=ai_html_source,
-            ai_html_document=ai_html_for_validation,
-        )
-        if ok and candidate_bundle is not None:
-            return candidate_bundle
-        last_reason = reason
+    if not is_qualified:
+        raise RuntimeError("report bundle generation failed after 3 attempts")
 
-    raise RuntimeError(
-        f"AI failed to generate qualified HTML report after {max_attempts} attempts: {last_reason}"
-    )
+    if not _is_standalone_html_document(stage2_bundle.get("html_document", "")):
+        stage2_bundle["html_document"] = _wrap_html_fragment_as_document(stage2_bundle.get("html_document", ""))
+    return stage2_bundle
 
 
 def _is_qualified_ai_report_bundle(
@@ -1200,6 +1305,21 @@ def _is_standalone_html_document(text: str) -> bool:
     if not re.search(r"<!doctype html[\s\S]*?</html>|<html[\s\S]*?</html>", html_text, re.IGNORECASE):
         return False
     return "<body" in html_text.lower()
+
+
+def _html_contains_markdown_artifacts(text: str) -> bool:
+    html_text = str(text or "")
+    if not html_text.strip():
+        return False
+    visible = re.sub(r"<script[\s\S]*?</script>|<style[\s\S]*?</style>", " ", html_text, flags=re.IGNORECASE)
+    visible = re.sub(r"<[^>]+>", "\n", visible)
+    patterns = (
+        r"(^|\n)\s{0,3}#{1,6}\s+\S",
+        r"\*\*[^*]+\*\*",
+        r"```",
+        r"(^|\n)\s*\|[^|\n]+\|[^|\n]*\n\s*\|?\s*:?-{3,}:?\s*\|",
+    )
+    return any(re.search(pattern, visible, flags=re.MULTILINE) for pattern in patterns)
 
 
 def _parse_report_bundle_json(raw: str) -> dict | None:
@@ -1297,6 +1417,58 @@ def _looks_like_markdown_text(text: str) -> bool:
     return any(marker in raw for marker in markers)
 
 
+def _strip_markdown_to_plain_text(text: str) -> str:
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+    cleaned_lines: list[str] = []
+    for line in raw.splitlines():
+        current = line.strip()
+        if not current:
+            continue
+        current = re.sub(r"^\s{0,3}#{1,6}\s*", "", current)
+        current = re.sub(r"^\s*[-*+]\s+", "", current)
+        current = re.sub(r"^\s*\d+\.\s+", "", current)
+        current = current.replace("|", " ")
+        current = re.sub(r"\*\*(.*?)\*\*", r"\1", current)
+        current = re.sub(r"__(.*?)__", r"\1", current)
+        current = re.sub(r"`([^`]*)`", r"\1", current)
+        current = re.sub(r"\s+", " ", current).strip()
+        if current:
+            cleaned_lines.append(current)
+    return "\n".join(cleaned_lines).strip()
+
+
+def _stringify_action_item(item) -> str:
+    if item is None:
+        return ""
+    if isinstance(item, str):
+        return item.strip()
+    if not isinstance(item, dict):
+        return str(item).strip()
+
+    primary = (
+        str(item.get("text", "") or item.get("action", "") or item.get("title", "") or "")
+        .strip()
+    )
+    effect = str(item.get("expected_effect", "") or item.get("impact", "") or "").strip()
+    owner = str(item.get("owner", "") or "").strip()
+    priority = str(item.get("priority", "") or "").strip()
+
+    parts: list[str] = []
+    if primary:
+        parts.append(primary)
+    if effect:
+        parts.append((t("label_expected_effect", default="预期效果") if get_lang() != "en" else "Expected effect") + f": {effect}")
+    if owner:
+        parts.append((t("label_owner", default="负责人") if get_lang() != "en" else "Owner") + f": {owner}")
+    if priority:
+        parts.append((t("label_priority", default="优先级") if get_lang() != "en" else "Priority") + f": {priority}")
+    if parts:
+        return " | ".join(parts)
+    return json.dumps(item, ensure_ascii=False, sort_keys=True)
+
+
 def _looks_like_json_text(text: str) -> bool:
     raw = str(text or "").strip()
     if not raw:
@@ -1358,6 +1530,9 @@ def _generate_html_document_by_llm(
         "Requirements:\n"
         "- Return only HTML text.\n"
         "- Use clear visual hierarchy.\n"
+        "- Use polished CSS, cards, metric callouts, section dividers, and real HTML tables.\n"
+        "- Do NOT include raw Markdown syntax in visible text: no ##, no **bold**, no |---| pipe tables, and no ``` fences.\n"
+        "- Convert any markdown table into a real <table><thead><tbody> structure.\n"
         "- Keep content faithful to source.\n"
         f"- Use {report_language} for the whole document text.\n"
         "- You MUST include chart placeholders using available chart ids: <div data-chart-id=\"...\"></div>.\n"
@@ -1545,6 +1720,9 @@ def _markdown_to_basic_html(markdown_text: str, extra_blocks: str = "") -> str:
         ".content p{margin:10px 0}"
         ".content ul,.content ol{margin:8px 0 12px 22px}"
         ".content li{margin:4px 0}"
+        ".content table{width:100%;border-collapse:collapse;margin:14px 0;font-size:13px}"
+        ".content th,.content td{border:1px solid #e2e8f0;padding:8px 10px;text-align:left;vertical-align:top}"
+        ".content th{background:#f8fafc;font-weight:700;color:#0f172a}"
         ".content code{padding:1px 5px;border-radius:4px;background:#e2e8f0;font-family:Consolas,monospace}"
         ".content hr{border:none;border-top:1px solid #e2e8f0;margin:18px 0}"
         "@media print{body{background:#fff}.paper{border:none;max-width:none;margin:0;padding:0}}</style>"
@@ -1566,6 +1744,7 @@ def _render_markdown_like_html(markdown_text: str) -> str:
     lines = str(markdown_text or "").splitlines()
     out: list[str] = []
     list_mode: str | None = None
+    table_mode = False
 
     def close_list() -> None:
         nonlocal list_mode
@@ -1575,47 +1754,94 @@ def _render_markdown_like_html(markdown_text: str) -> str:
             out.append("</ol>")
         list_mode = None
 
-    for raw in lines:
-        line = raw.rstrip()
+    def close_table() -> None:
+        nonlocal table_mode
+        if table_mode:
+            out.append("</tbody></table>")
+        table_mode = False
+
+    def is_table_separator(line: str) -> bool:
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        return len(cells) >= 2 and all(re.fullmatch(r":?-{3,}:?", cell or "") for cell in cells)
+
+    def parse_table_cells(line: str) -> list[str]:
+        return [cell.strip() for cell in line.strip().strip("|").split("|")]
+
+    index = 0
+    while index < len(lines):
+        line = lines[index].rstrip()
         stripped = line.strip()
+        if stripped and "|" in stripped and index + 1 < len(lines) and is_table_separator(lines[index + 1]):
+            close_list()
+            close_table()
+            headers = parse_table_cells(stripped)
+            out.append("<table><thead><tr>" + "".join(f"<th>{inline_render(cell)}</th>" for cell in headers) + "</tr></thead><tbody>")
+            table_mode = True
+            index += 2
+            while index < len(lines):
+                row_text = lines[index].strip()
+                if not row_text or "|" not in row_text or is_table_separator(row_text):
+                    break
+                cells = parse_table_cells(row_text)
+                out.append("<tr>" + "".join(f"<td>{inline_render(cell)}</td>" for cell in cells) + "</tr>")
+                index += 1
+            close_table()
+            continue
         if not stripped:
             close_list()
+            close_table()
+            index += 1
             continue
         if stripped == "---":
             close_list()
+            close_table()
             out.append("<hr/>")
+            index += 1
             continue
         if stripped.startswith("### "):
             close_list()
+            close_table()
             out.append(f"<h3>{inline_render(stripped[4:])}</h3>")
+            index += 1
             continue
         if stripped.startswith("## "):
             close_list()
+            close_table()
             out.append(f"<h2>{inline_render(stripped[3:])}</h2>")
+            index += 1
             continue
         if stripped.startswith("# "):
             close_list()
+            close_table()
             out.append(f"<h1>{inline_render(stripped[2:])}</h1>")
+            index += 1
             continue
         if re.match(r"^\d+\.\s+", stripped):
+            close_table()
             if list_mode != "ol":
                 close_list()
                 out.append("<ol>")
                 list_mode = "ol"
             item = re.sub(r"^\d+\.\s+", "", stripped)
             out.append(f"<li>{inline_render(item)}</li>")
+            index += 1
             continue
         if stripped.startswith("- "):
+            close_table()
             if list_mode != "ul":
                 close_list()
                 out.append("<ul>")
                 list_mode = "ul"
             out.append(f"<li>{inline_render(stripped[2:])}</li>")
+            index += 1
             continue
         close_list()
+        close_table()
         out.append(f"<p>{inline_render(stripped)}</p>")
+        index += 1
 
     close_list()
+    close_table()
     return "\n".join(out)
 
 

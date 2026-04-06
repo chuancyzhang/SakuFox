@@ -9,9 +9,12 @@ stays safe while avoiding "__import__ not found" errors.
 from collections import Counter, defaultdict
 from collections.abc import Callable
 from datetime import datetime as _datetime, date as _date, timedelta as _timedelta
+from io import BytesIO as _BytesIO, StringIO as _StringIO
+from pathlib import Path as _Path
 import json as _json
 import math as _math
 import re as _re
+import io as _io
 
 import numpy as _np
 import pandas as pd
@@ -154,6 +157,66 @@ def _normalize_python_result(frame: pd.DataFrame | list | None) -> tuple[list[di
     return frame.to_dict(orient="records"), frame
 
 
+def _is_json_safe_scalar(value) -> bool:
+    return value is None or isinstance(value, (str, int, float, bool))
+
+
+def _export_analysis_scalars(shared_namespace: dict) -> dict[str, object]:
+    exported: dict[str, object] = {}
+    blocked_names = {
+        "__builtins__",
+        "pd",
+        "pandas",
+        "np",
+        "numpy",
+        "json",
+        "math",
+        "re",
+        "io",
+        "Path",
+        "StringIO",
+        "BytesIO",
+        "datetime",
+        "date",
+        "timedelta",
+        "Counter",
+        "defaultdict",
+        "uploaded_dataframes",
+        "uploaded_file_paths",
+        "execute_select_sql",
+        "execute_select_df",
+        "publish_df",
+        "list_temp_tables",
+        "describe_table",
+        "safe_first_row",
+        "safe_get_value",
+        "safe_has_columns",
+        "chart_specs",
+        "step_results",
+        "final_df",
+        "df",
+        "last_sql_df",
+        "last_sql_rows",
+        "insight_hints",
+    }
+    for key, value in shared_namespace.items():
+        if key.startswith("_") or key in blocked_names:
+            continue
+        if _is_json_safe_scalar(value):
+            text = str(value).strip() if isinstance(value, str) else ""
+            if isinstance(value, str) and (not text or len(text) > 500):
+                continue
+            exported[key] = value
+            continue
+        if isinstance(value, _np.generic):
+            exported[key] = value.item()
+            continue
+        if isinstance(value, (list, tuple)) and len(value) <= 10 and all(_is_json_safe_scalar(item) for item in value):
+            exported[key] = list(value)
+            continue
+    return exported
+
+
 def run_python_pipeline(
     python_code: str,
     shared_namespace: dict,
@@ -161,6 +224,7 @@ def run_python_pipeline(
     upload_paths: dict[str, str],
     sql_tool: Callable[[str], list[dict]],
     step_results: list[dict] | None = None,
+    extra_globals: dict | None = None,
 ) -> dict:
     """
     Execute Python code within a persistent shared namespace.
@@ -180,6 +244,10 @@ def run_python_pipeline(
             "json": _json,
             "math": _math,
             "re": _re,
+            "io": _io,
+            "Path": _Path,
+            "StringIO": _StringIO,
+            "BytesIO": _BytesIO,
             "datetime": _datetime,
             "date": _date,
             "timedelta": _timedelta,
@@ -226,6 +294,8 @@ def run_python_pipeline(
 
     # Ensure step_results is always available and fresh
     shared_namespace["step_results"] = step_results or []
+    if extra_globals:
+        shared_namespace.update(extra_globals)
     
     # Ensure __builtins__ is available but safe
     if "__builtins__" not in shared_namespace:
@@ -267,6 +337,7 @@ def run_python_pipeline(
             "rows": rows,
             "chart_specs": chart_specs,
             "insight_hints": [str(x) for x in insight_hints],
+            "exported_vars": _export_analysis_scalars(shared_namespace),
         }
 
     except (KeyError, IndexError) as exc:
@@ -298,6 +369,7 @@ def run_python_pipeline(
             "chart_specs": chart_specs,
             "insight_hints": [str(x) for x in shared_namespace.get("insight_hints", []) if str(x).strip()],
             "warning": msg,
+            "exported_vars": _export_analysis_scalars(shared_namespace),
         }
     except Exception as exc:
         raise RuntimeError(t("error_python_exec", exc=str(exc), default=f"Python 执行出错: {str(exc)}")) from exc

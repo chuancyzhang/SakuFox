@@ -14,6 +14,10 @@ let currentEditingSkillId = ""; // skill being edited, or "" for create mode
 let skillModal = null; // Global reference for the skill detail modal
 let skillSourceSessionId = "";
 
+let activeAnalysisController = null;
+let activeAnalysisMode = "";
+let activeAnalysisWrapper = null;
+
 const userInfo = document.getElementById("userInfo");
 
 const tableList = document.getElementById("tableList");
@@ -106,6 +110,54 @@ function updateAiCard(wrapper, title, html, thought = null) {
 
   scrollToBottom();
 
+}
+
+function getStopButtonText() {
+  return (window.i18n && i18n.lang) === "en" ? "Stop" : "停止";
+}
+
+function setAnalysisRunningState(running, mode = "", wrapper = null) {
+  const sendBtn = document.getElementById("sendBtn");
+  const autoBtn = document.getElementById("autoAnalyzeBtn");
+  const stopText = getStopButtonText();
+
+  if (sendBtn) {
+    if (!sendBtn.dataset.normalLabel) sendBtn.dataset.normalLabel = sendBtn.textContent || "发送";
+    sendBtn.textContent = running ? stopText : sendBtn.dataset.normalLabel;
+    sendBtn.classList.toggle("btn-danger", running);
+    sendBtn.classList.toggle("btn-primary", !running);
+    sendBtn.disabled = false;
+  }
+
+  if (autoBtn) {
+    if (!autoBtn.dataset.normalLabel) autoBtn.dataset.normalLabel = autoBtn.textContent || "一键分析";
+    autoBtn.disabled = running;
+    autoBtn.textContent = autoBtn.dataset.normalLabel;
+    autoBtn.classList.toggle("btn-disabled", running);
+  }
+
+  if (running) {
+    activeAnalysisMode = mode || activeAnalysisMode;
+    activeAnalysisWrapper = wrapper || activeAnalysisWrapper;
+  } else {
+    activeAnalysisMode = "";
+    activeAnalysisWrapper = null;
+  }
+}
+
+function stopActiveAnalysis() {
+  if (activeAnalysisController) {
+    activeAnalysisController.abort();
+  }
+}
+
+function releaseAnalysisControls(controller = null) {
+  if (!controller || activeAnalysisController === controller) {
+    activeAnalysisController = null;
+    activeAnalysisMode = "";
+    activeAnalysisWrapper = null;
+    setAnalysisRunningState(false);
+  }
 }
 
 function normalizeStaticText() {
@@ -885,6 +937,35 @@ async function switchSession(targetSessionId) {
 
       if (iter.message) addUserMessage(iter.message);
 
+      if (Array.isArray(iter.loop_rounds) && iter.loop_rounds.length > 0) {
+
+        const wrapper = createAiMessageContainer();
+
+        renderAutoAnalysisCard(wrapper, {
+          mode: iter.mode === "auto_analysis" ? "auto" : "iterate",
+          title: iter.mode === "auto_analysis" ? "一键分析" : (i18n.t("analysis_conclusion") || "分析结果"),
+          status: iter.report_meta?.stop_reason
+            ? `${i18n.t("analysis_conclusion") || "分析结果"} | ${iter.report_meta.stop_reason}`
+            : (iter.mode === "auto_analysis" ? "已完成分析" : "已完成迭代"),
+          stopReason: iter.report_meta?.stop_reason || "",
+          reportTitle: iter.report_title || (iter.mode === "auto_analysis" ? "自动分析报告" : ""),
+          reportSummary: iter.final_report_summary || (iter.final_report_md || "").slice(0, 500),
+          reportHtml: iter.final_report_html || "",
+          reportChartBindings: iter.final_report_chart_bindings || [],
+          reportMarkdown: iter.final_report_md || "",
+          reportUrl: iter.mode === "auto_analysis" && iter.iteration_id
+            ? `/web/report.html?iteration_id=${encodeURIComponent(iter.iteration_id)}&lang=${encodeURIComponent((window.i18n && i18n.lang) || localStorage.getItem("lang") || "zh")}`
+            : "",
+          rounds: iter.loop_rounds || [],
+          finalRound: (iter.loop_rounds || [])[Math.max(0, (iter.loop_rounds || []).length - 1)] || null,
+          complete: true,
+          liveThought: "",
+        });
+
+        return;
+
+      }
+
       if (iter.mode === "auto_analysis") {
 
         const wrapper = createAiMessageContainer();
@@ -1140,6 +1221,138 @@ function escapeHtml(text) {
 
 }
 
+function sanitizeNarrativeText(text) {
+  return String(text || "").replace(/\{[a-zA-Z_][a-zA-Z0-9_]*(?::[^}]*)?\}/g, "");
+}
+
+
+function normalizeReportHtmlDocument(rawText) {
+  const text = String(rawText || "").trim();
+  if (!text) return "";
+
+  const extractStandaloneHtml = (candidate) => {
+    const match = String(candidate || "").match(/<!doctype html[\s\S]*?<\/html>|<html[\s\S]*?<\/html>/i);
+    return match ? match[0].trim() : "";
+  };
+
+  const tryParseJsonLike = (candidate) => {
+    try {
+      const parsed = JSON.parse(candidate);
+      if (parsed && typeof parsed === "object" && typeof parsed.html_document === "string") {
+        const rawHtml = parsed.html_document.trim();
+        return extractStandaloneHtml(rawHtml) || rawHtml;
+      }
+    } catch (_) {
+      // ignore
+    }
+    return "";
+  };
+
+  let html = tryParseJsonLike(text);
+  if (html) return html;
+
+  const firstBrace = text.indexOf("{");
+  const lastBrace = text.lastIndexOf("}");
+  if (firstBrace >= 0 && lastBrace > firstBrace) {
+    html = tryParseJsonLike(text.slice(firstBrace, lastBrace + 1));
+    if (html) return html;
+  }
+
+  const htmlField = text.match(/"html_document"\s*:\s*"([\s\S]*?)"\s*(?:,\s*"chart_bindings"|,\s*"summary"|,\s*"title"|,\s*"legacy_markdown"|\})/i);
+  if (htmlField && htmlField[1]) {
+    try {
+      const rawHtml = JSON.parse(`"${htmlField[1]}"`).trim();
+      return extractStandaloneHtml(rawHtml) || rawHtml;
+    } catch (_) {
+      const rawHtml = htmlField[1].trim();
+      return extractStandaloneHtml(rawHtml) || rawHtml;
+    }
+  }
+
+  const htmlBlock = text.match(/<!doctype html[\s\S]*?<\/html>|<html[\s\S]*?<\/html>/i);
+  if (htmlBlock) return htmlBlock[0].trim();
+
+  if (text.startsWith("{") || text.startsWith("[")) return "";
+
+  return `<!doctype html><html lang="zh-CN"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>Report</title><style>body{font-family:Inter,Arial,sans-serif;margin:24px;color:#111827;background:#fff;}pre{white-space:pre-wrap;line-height:1.6;}</style></head><body><pre>${escapeHtml(text)}</pre></body></html>`;
+}
+
+
+function mountEmbeddedReportCharts(frame, chartBindings, lang = "zh") {
+  if (!frame || !frame.contentDocument || !window.echarts || !Array.isArray(chartBindings)) return;
+  const doc = frame.contentDocument;
+  let chartSection = null;
+  const ensureSection = () => {
+    if (chartSection) return chartSection;
+    chartSection = doc.createElement("section");
+    chartSection.style.marginTop = "22px";
+    const heading = doc.createElement("h2");
+    heading.textContent = lang === "en" ? "Charts" : "图表";
+    heading.style.margin = "0 0 10px";
+    chartSection.appendChild(heading);
+    const root = doc.body || doc.documentElement;
+    if (root) root.appendChild(chartSection);
+    return chartSection;
+  };
+
+  chartBindings.forEach((binding) => {
+    if (!binding || typeof binding !== "object") return;
+    const chartId = String(binding.chart_id || "").trim();
+    const option = binding.option;
+    if (!chartId || !option || typeof option !== "object") return;
+    let host = doc.querySelector(`[data-chart-id="${chartId}"]`);
+    if (!host) {
+      const section = ensureSection();
+      const block = doc.createElement("section");
+      block.style.marginTop = "14px";
+      const title = doc.createElement("h3");
+      title.textContent = `${lang === "en" ? "Chart" : "图表"}: ${chartId}`;
+      title.style.margin = "0 0 8px";
+      host = doc.createElement("div");
+      host.setAttribute("data-chart-id", chartId);
+      block.appendChild(title);
+      block.appendChild(host);
+      section.appendChild(block);
+    }
+    const height = Math.max(200, Math.min(1200, parseInt(binding.height || 360, 10) || 360));
+    host.innerHTML = "";
+    const mount = doc.createElement("div");
+    mount.style.width = "100%";
+    mount.style.height = `${height}px`;
+    host.appendChild(mount);
+    const chart = echarts.init(mount);
+    chart.setOption(option);
+  });
+}
+
+
+function syncEmbeddedReportHeight(frame) {
+  try {
+    const doc = frame.contentDocument;
+    if (!doc) return;
+    if (doc.documentElement) doc.documentElement.style.overflow = "auto";
+    if (doc.body) doc.body.style.overflow = "auto";
+    if (doc.body) doc.body.style.margin = doc.body.style.margin || "0";
+    const bodyHeight = doc.body ? doc.body.scrollHeight : 0;
+    const htmlHeight = doc.documentElement ? doc.documentElement.scrollHeight : 0;
+    const viewportFloor = Math.max(800, window.innerHeight - 140);
+    const target = Math.max(bodyHeight, htmlHeight, viewportFloor);
+    frame.style.height = `${target}px`;
+  } catch (_) {
+    // no-op
+  }
+}
+
+
+function buildRoundChartId(seed, roundNo, chartIndex) {
+  return `analysis_${seed}_round_${roundNo}_chart_${chartIndex}`;
+}
+
+
+function buildFinalChartId(seed, chartIndex) {
+  return `analysis_${seed}_final_chart_${chartIndex}`;
+}
+
 
 
 function renderIterationResult(result, wrapper, accumulatedThought, chartContainers, dataRowsHtml, pendingCharts = []) {
@@ -1361,6 +1574,8 @@ function renderAutoAnalysisCard(wrapper, state) {
   const chartRefs = [];
   const lang = (window.i18n && i18n.lang) || localStorage.getItem("lang") || "zh";
   const isEn = lang === "en";
+  const mode = state.mode === "iterate" ? "iterate" : "auto";
+  const rounds = (state.rounds || []).filter(Boolean);
   const roundTitle = (roundNo) => (isEn ? `Round ${roundNo}` : `第 ${roundNo} 轮`);
   const noToolText = isEn ? "No tool calls" : "无工具调用";
   const findingsTitle = isEn ? "Key Findings" : "关键结论";
@@ -1371,12 +1586,24 @@ function renderAutoAnalysisCard(wrapper, state) {
   const reportReadyHint = isEn
     ? "After report generation, you can open the full report or export PDF."
     : "报告生成后可打开完整报告与导出 PDF";
-  const reportSummaryPending = isEn ? "Generating report summary..." : "报告摘要生成中...";
+  const reportSummaryPending = isEn ? "Generating HTML report..." : "HTML 报告生成中...";
   const reportFollowupHint = isEn
     ? "You can continue asking questions based on this report, or start another one-click analysis."
     : "可继续在聊天里追问该报告，或再次发起一键分析。";
   const analyzingText = isEn ? "Analyzing" : "正在分析";
+  const processTitle = isEn ? "Analysis Process" : "分析过程";
+  const finalTitle = mode === "auto" ? (isEn ? "Final Report" : "最终报告") : (isEn ? "Final Result" : "最终结果");
   const stopReasonLabel = isEn ? "Stop reason" : "停止原因";
+  const reportLang = lang;
+  const reportUrlBase = state.reportUrl || "";
+  const reportUrl = reportUrlBase
+    ? (reportUrlBase.includes("lang=")
+      ? reportUrlBase
+      : `${reportUrlBase}${reportUrlBase.includes("?") ? "&" : "?"}lang=${encodeURIComponent(reportLang)}`)
+    : "";
+
+  state.chartSeed = state.chartSeed || `${mode}_${Date.now().toString(36)}_${Math.random().toString(16).slice(2, 8)}`;
+  state.reportFrameId = state.reportFrameId || `report_frame_${state.chartSeed}`;
 
   const formatStopReason = (reason) => {
     const text = String(reason || "").trim();
@@ -1395,135 +1622,218 @@ function renderAutoAnalysisCard(wrapper, state) {
     return map[text] || text;
   };
 
-  const roundsHtml = (state.rounds || []).map((round) => {
-
+  const buildRoundCard = (round, index, { final = false } = {}) => {
     const result = round.result || {};
-
     const execution = round.execution || {};
-
+    const roundNo = round.round || index + 1;
+    const summaryText = String(
+      result.explanation ||
+      result.summary ||
+      result.final_answer ||
+      result.conclusion ||
+      ""
+    ).trim();
+    const directAnswerText = String(
+      result.direct_answer ||
+      result.directAnswer ||
+      result.answer ||
+      result.final_answer ||
+      ""
+    ).trim();
+    const extractTopAnswer = () => {
+      if (!Array.isArray(rows) || !rows.length) return "";
+      const normalizedRows = rows.filter((row) => row && typeof row === "object");
+      if (!normalizedRows.length) return "";
+      const pickField = (obj, candidates) => {
+        for (const key of Object.keys(obj)) {
+          const lower = key.toLowerCase();
+          if (candidates.some((candidate) => lower === candidate || lower.includes(candidate))) {
+            const value = obj[key];
+            if (value !== null && value !== undefined && String(value).trim() !== "") return { key, value };
+          }
+        }
+        return null;
+      };
+      const topRow = normalizedRows[0];
+      const dimension = pickField(topRow, ["department", "dept", "部门", "organization", "org"]);
+      const metric = pickField(topRow, ["total_cost", "cost", "sum_cost", "amount", "total"]);
+      if (!dimension) return "";
+      const metricText = metric ? `，${escapeHtml(metric.key)}: ${escapeHtml(String(metric.value))}` : "";
+      return `<div class="analysis-answer-callout"><strong>${isEn ? "Top department" : "成本最高部门"}：</strong>${escapeHtml(String(dimension.value))}${metricText}</div>`;
+    };
     const conclusions = (result.conclusions || []).map((item) => {
-
       const text = typeof item === "object" ? item.text : item;
-
       const confidence = typeof item === "object" ? item.confidence : null;
-
       const suffix = confidence === null || confidence === undefined
-
         ? ""
-
         : ` <span style="font-size:11px;color:var(--text-muted)">(${Math.round(confidence * 100)}%)</span>`;
-
-      return `<li>${escapeHtml(text || "")}${suffix}</li>`;
-
+      return `<li>${escapeHtml(sanitizeNarrativeText(text || ""))}${suffix}</li>`;
     }).join("");
-
-    const actions = (result.action_items || result.actionItems || []).map((item) => `<li>${escapeHtml(item)}</li>`).join("");
-
+    const actions = (result.action_items || result.actionItems || []).map((item) => `<li>${escapeHtml(sanitizeNarrativeText(item))}</li>`).join("");
+    const hypotheses = (result.hypotheses || []).map((h) => {
+      const text = sanitizeNarrativeText(typeof h === "object" ? (h.text || "") : String(h || ""));
+      const id = typeof h === "object" ? (h.id || "") : "";
+      return `
+      <button class="btn btn-outline btn-sm hypothesis-btn" style="margin:4px 6px 4px 0;text-align:left;white-space:normal;height:auto;" data-id="${escapeHtml(id)}" data-text="${escapeHtml(text)}">
+        <i class="fa-solid fa-magnifying-glass"></i> ${escapeHtml(text)}
+      </button>
+    `;
+    }).join("");
     const rows = execution.rows || [];
-
     const charts = execution.chart_specs || [];
-
     const chartsHtml = charts.map((spec, idx) => {
-
-      const id = `auto_chart_${Date.now()}_${round.round}_${idx}_${Math.random().toString(16).slice(2, 8)}`;
-
+      const id = final
+        ? buildFinalChartId(state.chartSeed, idx)
+        : buildRoundChartId(state.chartSeed, roundNo, idx);
       chartRefs.push({ id, spec });
-
-      return `<div id="${id}" style="height:300px;width:100%;margin:12px 0;"></div>`;
-
+      return `<div id="${id}" class="analysis-chart-host"></div>`;
     }).join("");
-
-    const stepsHtml = (result.steps || []).map((step, idx) => `
-
-      <details class="code-details" style="margin-top:8px;">
-
-        <summary style="font-size:12px;font-weight:600;">${escapeHtml(step.tool || (isEn ? "step" : "步骤"))} ${idx + 1}</summary>
-
-        <pre><code>${escapeHtml(step.code || "")}</code></pre>
-
+    const stepsHtml = (result.steps || []).length ? `
+      <details class="code-details analysis-step-details">
+        <summary style="font-size:12px;font-weight:600;">${isEn ? "Steps" : "步骤"} (${(result.steps || []).length})</summary>
+        ${(result.steps || []).map((step, idx) => `
+          <details class="code-details" style="margin-top:8px;">
+            <summary style="font-size:12px;font-weight:600;">${escapeHtml(step.tool || (isEn ? "step" : "步骤"))} ${idx + 1}</summary>
+            <pre><code>${escapeHtml(step.code || "")}</code></pre>
+          </details>
+        `).join("")}
       </details>
-
-    `).join("");
-
+    ` : "";
     const errorHtml = round.error || execution.error
-
-      ? `<div style="margin-top:10px;color:#ef4444;font-size:13px;"><i class="fa-solid fa-circle-exclamation"></i> ${escapeHtml(round.error || execution.error)}</div>`
-
+      ? `<div class="analysis-error"><i class="fa-solid fa-circle-exclamation"></i> ${escapeHtml(sanitizeNarrativeText(round.error || execution.error))}</div>`
       : "";
-
     const thoughtHtml = round.thought
-
-      ? `<details style="margin-top:10px;"><summary style="cursor:pointer;font-size:12px;">${i18n.t("thought_process") || "思考过程"}</summary><div style="white-space:pre-wrap;font-size:12px;color:var(--text-muted);margin-top:8px;">${escapeHtml(round.thought)}</div></details>`
-
+      ? `<details class="analysis-thought" ${final ? "" : "open"}>
+          <summary style="cursor:pointer;font-size:12px;">${i18n.t("thought_process") || "思考过程"}</summary>
+          <div style="white-space:pre-wrap;font-size:12px;color:var(--text-muted);margin-top:8px;">${escapeHtml(sanitizeNarrativeText(round.thought))}</div>
+        </details>`
       : "";
+    const summaryHtml = summaryText
+      ? `<div class="analysis-section"><div class="analysis-section-title">${isEn ? "Result Summary" : "结果摘要"}</div><div style="white-space:pre-wrap;font-size:13px;line-height:1.7;color:var(--text-main);">${escapeHtml(sanitizeNarrativeText(summaryText))}</div></div>`
+      : "";
+    const directAnswerHtml = directAnswerText
+      ? `<div class="analysis-answer-callout"><strong>${isEn ? "Direct Answer" : "明确答案"}：</strong>${escapeHtml(sanitizeNarrativeText(directAnswerText))}</div>`
+      : "";
+    const modeLabel = final && mode === "iterate" ? finalTitle : roundTitle(roundNo);
+    const toolsText = escapeHtml((result.tools_used || []).join(", ") || noToolText);
 
     return `
-
-      <div style="margin-top:16px;padding:14px;border:1px solid var(--border);border-radius:10px;background:#fff;">
-
-        <div style="display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:10px;">
-
-          <div style="font-weight:600;color:var(--text-main);">${roundTitle(round.round)}</div>
-
-          <div style="font-size:12px;color:var(--text-muted);">${escapeHtml((result.tools_used || []).join(", ") || noToolText)}</div>
-
+      <article class="analysis-round-card ${final ? "final-round" : ""}">
+        <div class="analysis-round-header">
+          <div class="analysis-round-title">${modeLabel}</div>
+          <div class="analysis-round-tools">${toolsText}</div>
         </div>
-
         ${thoughtHtml}
-
-        ${conclusions ? `<div style="margin-top:10px;"><div style="font-weight:600;font-size:13px;margin-bottom:6px;">${findingsTitle}</div><ul style="padding-left:18px;margin:0;">${conclusions}</ul></div>` : ""}
-
-        ${actions ? `<div style="margin-top:10px;"><div style="font-weight:600;font-size:13px;margin-bottom:6px;">${actionsTitle}</div><ul style="padding-left:18px;margin:0;">${actions}</ul></div>` : ""}
-
-        ${chartsHtml}
-
-        ${rows.length ? `<details style="margin-top:10px;"><summary style="cursor:pointer;font-size:12px;">${previewTitle} (${rows.length} ${i18n.t("rows") || (isEn ? "rows" : "行")})</summary>${jsonToTable(rows.slice(0, 50))}</details>` : ""}
-
+        ${final && mode === "iterate" ? summaryHtml : ""}
+        ${final && mode === "iterate" ? (directAnswerHtml || extractTopAnswer()) : ""}
+        ${conclusions ? `<div class="analysis-section"><div class="analysis-section-title">${findingsTitle}</div><ul class="analysis-list">${conclusions}</ul></div>` : ""}
+        ${actions ? `<div class="analysis-section"><div class="analysis-section-title">${actionsTitle}</div><ul class="analysis-list">${actions}</ul></div>` : ""}
+        ${chartsHtml ? `<div class="analysis-chart-grid">${chartsHtml}</div>` : ""}
+        ${rows.length ? `<details class="analysis-data-details"${final ? " open" : ""}><summary style="cursor:pointer;font-size:12px;">${previewTitle} (${rows.length} ${i18n.t("rows") || (isEn ? "rows" : "行")})</summary>${jsonToTable(rows.slice(0, 50))}</details>` : ""}
+        ${hypotheses ? `<div class="analysis-section"><div class="analysis-section-title">${isEn ? "Hypotheses" : "猜想"}</div><div style="display:flex;flex-wrap:wrap;">${hypotheses}</div></div>` : ""}
         ${stepsHtml}
-
         ${errorHtml}
-
-      </div>
-
+      </article>
     `;
+  };
 
-  }).join("");
+  const roundHasMeaningfulOutput = (round) => {
+    if (!round || typeof round !== "object") return false;
+    const result = round.result || {};
+    const execution = round.execution || {};
+    const conclusions = Array.isArray(result.conclusions) ? result.conclusions : [];
+    const actions = Array.isArray(result.action_items || result.actionItems) ? (result.action_items || result.actionItems) : [];
+    const hypothesesList = Array.isArray(result.hypotheses) ? result.hypotheses : [];
+    const stepsList = Array.isArray(result.steps) ? result.steps : [];
+    const rowsList = Array.isArray(execution.rows) ? execution.rows : [];
+    const chartsList = Array.isArray(execution.chart_specs) ? execution.chart_specs : [];
+    const explanation = String(result.explanation || "").trim();
+    const directReport = String(result.direct_report || "").trim();
+    if (conclusions.length || actions.length || hypothesesList.length || stepsList.length || rowsList.length || chartsList.length) return true;
+    if (directReport) return true;
+    if (explanation && explanation !== "model stopped without additional tool calls") return true;
+    return false;
+  };
 
-  const reportTitle = state.reportTitle || (isEn ? "Auto Analysis Report" : "自动分析报告");
-  const reportSummary = (state.reportSummary || "").trim();
-  const reportLang = (window.i18n && i18n.lang) || localStorage.getItem("lang") || "zh";
-  const reportUrlBase = state.reportUrl || "";
-  const reportUrl = reportUrlBase
-    ? (reportUrlBase.includes("lang=")
-      ? reportUrlBase
-      : `${reportUrlBase}${reportUrlBase.includes("?") ? "&" : "?"}lang=${encodeURIComponent(reportLang)}`)
-    : "";
-  const reportActions = reportUrl
-    ? `<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px;">
-        <button class="btn btn-outline btn-sm open-report-btn" data-url="${escapeHtml(reportUrl)}"><i class="fa-solid fa-arrow-up-right-from-square"></i> ${openReportText}</button>
-        <button class="btn btn-outline btn-sm print-report-btn" data-url="${escapeHtml(reportUrl)}"><i class="fa-solid fa-file-pdf"></i> ${exportPdfText}</button>
-      </div>`
-    : `<div style="font-size:12px;color:var(--text-muted);margin-top:8px;">${reportReadyHint}</div>`;
-  const reportSection = (reportSummary || reportTitle || reportUrl)
-    ? `<div style="margin-top:16px;padding:16px;border:1px solid #dbeafe;border-radius:12px;background:#f8fbff;">
-        <div style="font-weight:700;color:#1d4ed8;margin-bottom:8px;">${escapeHtml(reportTitle)}</div>
-        <div style="font-size:13px;line-height:1.6;color:#334155;">${reportSummary ? escapeHtml(reportSummary) : reportSummaryPending}</div>
-        ${reportActions}
-        <div style="font-size:12px;color:var(--text-muted);margin-top:8px;">${reportFollowupHint}</div>
-      </div>`
-    : "";
+  const getMeaningfulFinalRound = () => {
+    for (let i = rounds.length - 1; i >= 0; i -= 1) {
+      if (roundHasMeaningfulOutput(rounds[i])) return rounds[i];
+    }
+    return rounds[rounds.length - 1] || null;
+  };
+
+  const processHtml = rounds.length ? `
+    <details class="analysis-process-panel" ${state.complete ? "" : "open"}>
+      <summary class="analysis-process-summary">
+        <span>${processTitle}</span>
+        <span class="analysis-process-meta">${rounds.length} ${isEn ? "rounds" : "轮"}</span>
+      </summary>
+      <div class="analysis-process-body">
+        ${rounds.map((round, idx) => buildRoundCard(round, idx)).join("")}
+      </div>
+    </details>
+  ` : "";
+
+  const finalRound = mode === "iterate"
+    ? (getMeaningfulFinalRound() || state.finalRound || rounds[rounds.length - 1] || null)
+    : (state.finalRound || rounds[rounds.length - 1] || null);
+  const finalSection = mode === "auto"
+    ? (() => {
+        const reportTitle = state.reportTitle || (isEn ? "Auto Analysis Report" : "自动分析报告");
+        const reportMarkdown = String(state.reportMarkdown || "").trim();
+        const reportSummary = String(state.reportSummary || "").trim();
+        const chatReportMarkdown = reportMarkdown || (reportSummary ? `## ${reportTitle}\n\n${reportSummary}` : "");
+        const reportActions = reportUrl
+          ? `<div class="analysis-report-actions">
+              <button class="btn btn-outline btn-sm open-report-btn" data-url="${escapeHtml(reportUrl)}"><i class="fa-solid fa-arrow-up-right-from-square"></i> ${openReportText}</button>
+              <button class="btn btn-outline btn-sm print-report-btn" data-url="${escapeHtml(reportUrl)}"><i class="fa-solid fa-file-pdf"></i> ${exportPdfText}</button>
+            </div>`
+          : `<div class="analysis-report-hint">${reportReadyHint}</div>`;
+        const reportPreview = chatReportMarkdown
+          ? `<div class="analysis-report-markdown-summary">${renderMarkdownContent(chatReportMarkdown)}</div>`
+          : `<div class="analysis-report-placeholder">${reportSummaryPending}</div>`;
+        return `
+          <section class="analysis-final-panel">
+            <div class="analysis-final-panel-header">${finalTitle}</div>
+            ${reportActions}
+            ${reportPreview}
+            <div class="analysis-report-followup">${reportFollowupHint}</div>
+          </section>
+        `;
+      })()
+    : (finalRound ? `
+        <section class="analysis-final-panel">
+          <div class="analysis-final-panel-header">${finalTitle}</div>
+          ${buildRoundCard(finalRound, rounds.length - 1, { final: true })}
+        </section>
+      ` : "");
 
   const statusLine = `
-
-    <div style="font-size:13px;color:var(--text-muted);margin-bottom:10px;">
-
-      ${escapeHtml(state.status || analyzingText)} ${state.stopReason ? `| ${stopReasonLabel}: ${escapeHtml(formatStopReason(state.stopReason))}` : ""}
-
+    <div class="analysis-status-line">
+      ${escapeHtml(state.status || analyzingText)}${state.stopReason ? ` | ${stopReasonLabel}: ${escapeHtml(formatStopReason(state.stopReason))}` : ""}
     </div>
-
   `;
 
-  updateAiCard(wrapper, state.title || (isEn ? "Auto Analyze" : "一键分析"), `${statusLine}${reportSection}${roundsHtml}`, state.liveThought || null);
+  updateAiCard(wrapper, state.title || (isEn ? "Analysis" : "分析"), `${statusLine}${processHtml}${finalSection}`, state.liveThought || null);
+
+  wrapper.querySelectorAll(".hypothesis-btn").forEach(btn => {
+    btn.onclick = () => {
+      document.getElementById("questionInput").value = `${i18n.t("validate_hypothesis") || "验证猜想"}: ${btn.getAttribute("data-text")}`;
+      handleSend(btn.getAttribute("data-id"));
+    };
+  });
+
+  if (chartRefs.length > 0) {
+    setTimeout(() => {
+      chartRefs.forEach(({ id, spec }) => {
+        const dom = document.getElementById(id);
+        if (dom && spec) {
+          const chart = echarts.init(dom);
+          chart.setOption(spec);
+        }
+      });
+    }, 50);
+  }
 
   wrapper.querySelectorAll(".open-report-btn").forEach((btn) => {
     btn.onclick = () => {
@@ -1539,29 +1849,6 @@ function renderAutoAnalysisCard(wrapper, state) {
       window.open(printUrl, "_blank", "noopener");
     };
   });
-
-  if (chartRefs.length > 0) {
-
-    setTimeout(() => {
-
-      chartRefs.forEach(({ id, spec }) => {
-
-        const dom = document.getElementById(id);
-
-        if (dom && spec) {
-
-          const chart = echarts.init(dom);
-
-          chart.setOption(spec);
-
-        }
-
-      });
-
-    }, 50);
-
-  }
-
 }
 
 
@@ -1569,6 +1856,7 @@ function replayAutoAnalysisIteration(iter, wrapper) {
   const reportLang = (window.i18n && i18n.lang) || localStorage.getItem("lang") || "zh";
 
   renderAutoAnalysisCard(wrapper, {
+    mode: "auto",
 
     title: "一键分析",
 
@@ -1580,9 +1868,19 @@ function replayAutoAnalysisIteration(iter, wrapper) {
 
     reportSummary: iter.final_report_summary || (iter.final_report_md || "").slice(0, 500),
 
+    reportHtml: iter.final_report_html || "",
+
+    reportChartBindings: iter.final_report_chart_bindings || [],
+
+    reportMarkdown: iter.final_report_md || "",
+
     reportUrl: iter.iteration_id ? `/web/report.html?iteration_id=${encodeURIComponent(iter.iteration_id)}&lang=${encodeURIComponent(reportLang)}` : "",
 
     rounds: iter.loop_rounds || [],
+
+    complete: true,
+
+    allowMarkdownFallback: !iter.final_report_html && !!iter.final_report_md,
 
     liveThought: "",
 
@@ -1716,7 +2014,20 @@ async function handleSend(hypothesisId = null) {
 
   updateAiCard(wrapper, i18n.t("ai_thinking"), `<div>${i18n.t('thinking_desc')}</div>`, "");
 
+  const notebookState = {
+    mode: "iterate",
+    title: i18n.t("analysis_conclusion") || "分析结果",
+    status: i18n.t("ai_thinking") || "AI 正在思考",
+    stopReason: "",
+    rounds: [],
+    finalRound: null,
+    liveThought: "",
+    complete: false,
+  };
 
+  const controller = new AbortController();
+  activeAnalysisController = controller;
+  setAnalysisRunningState(true, "iterate", wrapper);
 
   try {
 
@@ -1737,6 +2048,8 @@ async function handleSend(hypothesisId = null) {
 
       headers,
 
+      signal: controller.signal,
+
       body: JSON.stringify(reqBody),
 
     });
@@ -1755,17 +2068,10 @@ async function handleSend(hypothesisId = null) {
 
     let accumulatedThought = "";
 
-    let chartContainers = "";
-
-    let chartIndex = 0;
-
-    let dataRowsHtml = "";
-
-    let finalResultData = null;
-
     let autoCompleted = false;
-
-    let pendingCharts = []; // Collect specs for initialization AFTER DOM update
+    let sawRoundPayload = false;
+    let legacyThought = "";
+    let legacyFinalResult = null;
 
 
 
@@ -1793,47 +2099,34 @@ async function handleSend(hypothesisId = null) {
 
           const data = JSON.parse(line);
 
-          if (data.type === "thought") {
-
-            accumulatedThought += data.content;
-
-            updateAiCard(wrapper, i18n.t("ai_analyzing"), `<div>${i18n.t('analyzing_desc')}</div>`, accumulatedThought);
-
+          if (data.type === "loop_status") {
+            sawRoundPayload = true;
+            const info = data.data || {};
+            notebookState.status = info.message || notebookState.status;
+            notebookState.liveThought = info.phase === "thinking" ? (info.message || "") : "";
+            renderAutoAnalysisCard(wrapper, notebookState);
+          } else if (data.type === "loop_round") {
+            sawRoundPayload = true;
+            const roundData = data.data || {};
+            notebookState.rounds[roundData.round - 1] = roundData;
+            notebookState.finalRound = roundData;
+            notebookState.liveThought = "";
+            notebookState.complete = false;
+            notebookState.status = i18n.t("analysis_conclusion") || "分析结果";
+            renderAutoAnalysisCard(wrapper, notebookState);
+          } else if (data.type === "thought") {
+            legacyThought += data.content || "";
+            if (!sawRoundPayload) {
+              notebookState.liveThought = legacyThought;
+              renderAutoAnalysisCard(wrapper, notebookState);
+            }
           } else if (data.type === "result") {
 
-            finalResultData = data.data;
+            legacyFinalResult = data.data;
 
-          } else if (data.type === "data") {
+          } else if (data.type === "data" || data.type === "chart_spec" || data.type === "step_result") {
 
-            // Received sample data rows
-
-            dataRowsHtml = `
-
-              <details style="margin-top:16px;border:1px solid var(--border);border-radius:6px;overflow:hidden;">
-
-                <summary style="background:#f8f9fa;padding:10px 16px;cursor:pointer;font-size:13px;font-weight:600;color:var(--text-main);">
-
-                  ${i18n.t('raw_data_preview')} (${data.rows.length} ${i18n.t('rows')})
-
-                </summary>
-
-                <div style="padding:0">
-
-                  ${jsonToTable(data.rows)}
-
-                </div>
-
-              </details>
-
-            `;
-
-          } else if (data.type === "chart_spec") {
-
-            const id = `chart_${Date.now()}_${chartIndex++}`;
-
-            chartContainers += `<div id="${id}" style="height:320px;width:100%;margin:16px 0;"></div>`;
-
-            pendingCharts.push({ id, spec: data.data });
+            // legacy compatibility only; loop_round drives the new UI
 
           } else if (data.type === "iteration_complete") {
 
@@ -1841,13 +2134,13 @@ async function handleSend(hypothesisId = null) {
 
             lastProposalId = data.data.proposal_id; // For skill saving
 
-            if (finalResultData) {
-
-              renderIterationResult(finalResultData, wrapper, accumulatedThought, chartContainers, dataRowsHtml, pendingCharts);
-
-            }
+            notebookState.stopReason = data.data.stop_reason || notebookState.stopReason;
+            notebookState.complete = true;
+            notebookState.status = i18n.t("analysis_conclusion") || "分析结果";
+            renderAutoAnalysisCard(wrapper, notebookState);
 
             autoCompleted = true;
+            releaseAnalysisControls(controller);
 
             // Auto-refresh session list so current session appears immediately
 
@@ -1855,7 +2148,7 @@ async function handleSend(hypothesisId = null) {
 
           } else if (data.type === "error") {
 
-            updateAiCard(wrapper, i18n.t("error_occurred"), `<div style="color: #ef4444">${data.message}</div>`, accumulatedThought);
+            updateAiCard(wrapper, i18n.t("error_occurred"), `<div style="color: #ef4444">${data.message}</div>`, legacyThought || notebookState.liveThought);
 
           }
 
@@ -1873,18 +2166,25 @@ async function handleSend(hypothesisId = null) {
 
     // In case execution stream was incomplete but we had result data
 
-    if (!autoCompleted && finalResultData) {
+    if (!autoCompleted && !sawRoundPayload && legacyFinalResult) {
 
-      renderIterationResult(finalResultData, wrapper, accumulatedThought, chartContainers, dataRowsHtml, pendingCharts);
+      renderIterationResult(legacyFinalResult, wrapper, legacyThought, "", "", []);
 
     }
 
 
 
   } catch (e) {
-
-    updateAiCard(wrapper, i18n.t("request_failed") || "请求失败", `<div style="color: #ef4444">${e.message}</div>`);
-
+    if (e && e.name === "AbortError") {
+      notebookState.stopReason = "stopped_by_user";
+      notebookState.status = i18n.t("analysis_stopped") || (i18n.lang === "en" ? "Stopped" : "已停止");
+      notebookState.complete = true;
+      renderAutoAnalysisCard(wrapper, notebookState);
+    } else {
+      updateAiCard(wrapper, i18n.t("request_failed") || "请求失败", `<div style="color: #ef4444">${e.message}</div>`);
+    }
+  } finally {
+    releaseAnalysisControls(controller);
   }
 
 }
@@ -1963,6 +2263,7 @@ async function handleAutoAnalyze() {
   const isEn = lang === "en";
 
   const state = {
+    mode: "auto",
 
     title: isEn ? "Auto Analyze" : "一键分析",
 
@@ -1976,6 +2277,12 @@ async function handleAutoAnalyze() {
 
     reportUrl: "",
 
+    reportHtml: "",
+
+    reportMarkdown: "",
+
+    reportChartBindings: [],
+
     rounds: [],
 
     liveThought: ""
@@ -1983,6 +2290,10 @@ async function handleAutoAnalyze() {
   };
 
   renderAutoAnalysisCard(wrapper, state);
+
+  const controller = new AbortController();
+  activeAnalysisController = controller;
+  setAnalysisRunningState(true, "auto", wrapper);
 
   try {
 
@@ -2000,6 +2311,8 @@ async function handleAutoAnalyze() {
       method: "POST",
 
       headers,
+
+      signal: controller.signal,
 
       body: JSON.stringify(reqBody),
 
@@ -2081,6 +2394,12 @@ async function handleAutoAnalyze() {
 
             state.reportSummary = data.summary || state.reportSummary || "";
 
+            state.reportMarkdown = data.markdown || state.reportMarkdown || "";
+
+            state.reportHtml = data.html_document || state.reportHtml || "";
+
+            state.reportChartBindings = data.chart_bindings || state.reportChartBindings || [];
+
             state.stopReason = data.stop_reason || "";
 
             state.status = isEn ? "Finalizing report" : "正在整理最终报告";
@@ -2111,7 +2430,10 @@ async function handleAutoAnalyze() {
 
             state.reportTitle = data.report_title || state.reportTitle || (isEn ? "Auto Analysis Report" : "自动分析报告");
 
+            state.complete = true;
+
             renderAutoAnalysisCard(wrapper, state);
+            releaseAnalysisControls(controller);
 
             refreshSessions();
 
@@ -2132,24 +2454,50 @@ async function handleAutoAnalyze() {
     }
 
   } catch (e) {
-
-    updateAiCard(wrapper, i18n.t("request_failed") || "请求失败", `<div style="color: #ef4444">${escapeHtml(e.message)}</div>`);
-
+    if (e && e.name === "AbortError") {
+      state.stopReason = "stopped_by_user";
+      state.status = isEn ? "Stopped" : "已停止";
+      state.complete = true;
+      renderAutoAnalysisCard(wrapper, state);
+    } else {
+      updateAiCard(wrapper, i18n.t("request_failed") || "请求失败", `<div style="color: #ef4444">${escapeHtml(e.message)}</div>`);
+    }
+  } finally {
+    releaseAnalysisControls(controller);
   }
 
 }
 
 
 
-document.getElementById("sendBtn").onclick = () => handleSend();
+document.getElementById("sendBtn").onclick = () => {
+  if (activeAnalysisController) {
+    stopActiveAnalysis();
+    return;
+  }
+  handleSend();
+};
 
-document.getElementById("autoAnalyzeBtn").onclick = () => handleAutoAnalyze();
+document.getElementById("autoAnalyzeBtn").onclick = () => {
+  if (activeAnalysisController) {
+    stopActiveAnalysis();
+    return;
+  }
+  handleAutoAnalyze();
+};
 
 
 
 document.getElementById("questionInput").onkeydown = (e) => {
 
-  if (e.key === "Enter") handleSend();
+  if (e.key === "Enter") {
+    if (activeAnalysisController) {
+      e.preventDefault();
+      stopActiveAnalysis();
+      return;
+    }
+    handleSend();
+  }
 
 };
 
