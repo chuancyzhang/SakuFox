@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from sqlalchemy import Column, String, Text, JSON, DateTime, Integer, Boolean, ForeignKey
+from sqlalchemy import Column, String, Text, JSON, DateTime, Integer, Boolean, ForeignKey, UniqueConstraint
 from sqlalchemy.orm import declarative_base
 
 Base = declarative_base()
@@ -125,3 +125,39 @@ class DBProposal(Base):
     final_report_chart_bindings = Column(JSON)
     report_meta = Column(JSON)
     created_at = Column(String(50))
+
+
+class DBExecutionRun(Base):
+    __tablename__ = "execution_runs"
+    run_id = Column(String(50), primary_key=True)
+    status = Column(String(20), index=True)  # running / success / failed
+    sandbox_id = Column(String(50), index=True)
+    user_id = Column(String(50), index=True)
+    sql = Column(Text)
+    dependencies = Column(JSON)  # list[str], physical tables after virtual-view expansion
+    row_count = Column(Integer, default=0)
+    columns = Column(JSON)  # list[dict], e.g. [{"name": "...", "type": "..."}]
+    error = Column(Text)
+    duration_ms = Column(Integer, default=0)
+    result_preview = Column(JSON)  # list[dict]
+    created_at = Column(String(50))
+    updated_at = Column(String(50))
+
+
+class DBSandboxVirtualView(Base):
+    __tablename__ = "sandbox_virtual_views"
+    __table_args__ = (
+        UniqueConstraint("sandbox_id", "name", name="uq_sandbox_virtual_view_name"),
+    )
+
+    view_id = Column(String(50), primary_key=True)
+    sandbox_id = Column(String(50), index=True)
+    name = Column(String(128), index=True)
+    description = Column(Text)
+    sql = Column(Text)
+    columns = Column(JSON)  # list[dict], each dict may contain name/type/description
+    sample_rows = Column(JSON)  # list[dict]
+    source_run_id = Column(String(50), index=True)
+    created_by = Column(String(50), index=True)
+    created_at = Column(String(50))
+    updated_at = Column(String(50))

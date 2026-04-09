@@ -309,9 +309,7 @@ def _build_iteration_user_prompt(
 
     if sandbox_id:
 
-        from app.store import DatabaseStore
-
-        store = DatabaseStore()
+        from app.store import store
 
         context = store.get_sandbox_full_context(sandbox_id)
 
@@ -334,16 +332,27 @@ def _build_iteration_user_prompt(
                 cols = info.get("columns", [])
 
                 sample = info.get("sample", [])
+                is_virtual_view = bool(info.get("virtual_view")) or str(info.get("type") or "") == "virtual_view"
+                view_desc = str(info.get("description") or "").strip()
+                source_sql_summary = str(info.get("source_sql_summary") or "").strip()
 
                 col_desc = ", ".join(f"{c['name']} ({c['type']})" for c in cols)
 
                 table_label = t("label_table_name", default="表名")
+                type_label = t("label_context_type", default="上下文类型")
+                view_desc_label = t("label_view_description", default="视图业务描述")
+                view_sql_label = t("label_view_source_sql", default="源 SQL 摘要")
 
                 column_label = t("label_columns", default="字段")
 
                 sample_label = t("label_sample_data", default="样数据(前3行)")
 
                 parts.append(f"{table_label}: {tbl}")
+                parts.append(f"{type_label}: {'virtual_view' if is_virtual_view else 'physical_table'}")
+                if is_virtual_view and view_desc:
+                    parts.append(f"{view_desc_label}: {view_desc}")
+                if is_virtual_view and source_sql_summary:
+                    parts.append(f"{view_sql_label}: {source_sql_summary}")
 
                 parts.append(f"{column_label}: {col_desc or 'N/A'}")
 

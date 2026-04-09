@@ -1,0 +1,228 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title data-i18n="sql_toolbox_title">SQL 工具箱 - SakuFox 🦊</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  <link rel="stylesheet" href="/web/styles.css" />
+  <style>
+    body { margin: 0; background: #f8fafc; overflow: auto; }
+    .page-wrap { max-width: 1400px; margin: 0 auto; padding: 20px; box-sizing: border-box; }
+    .intro { margin-bottom: 14px; color: #475569; font-size: 13px; line-height: 1.7; }
+    .workspace-grid {
+      display: grid;
+      grid-template-columns: 320px 1fr;
+      gap: 16px;
+      align-items: start;
+    }
+    .card-box {
+      background: #fff;
+      border: 1px solid #e2e8f0;
+      border-radius: 12px;
+      padding: 14px;
+      box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+    }
+    .card-title {
+      margin: 0 0 10px 0;
+      font-size: 14px;
+      font-weight: 700;
+      color: #0f172a;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .section-muted { color: #64748b; font-size: 12px; }
+    .model-list, .run-list, .view-list {
+      margin: 0;
+      padding: 0;
+      list-style: none;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      max-height: 240px;
+      overflow-y: auto;
+    }
+    .list-item {
+      border: 1px solid #e2e8f0;
+      border-radius: 8px;
+      padding: 10px;
+      background: #f8fafc;
+      font-size: 12px;
+      color: #334155;
+    }
+    .list-item strong { color: #0f172a; font-size: 13px; }
+    .sql-input {
+      width: 100%;
+      min-height: 180px;
+      border: 1px solid #cbd5e1;
+      border-radius: 10px;
+      padding: 12px;
+      font-family: "Consolas", "Monaco", monospace;
+      font-size: 13px;
+      line-height: 1.5;
+      box-sizing: border-box;
+      resize: vertical;
+    }
+    .sql-toolbar {
+      margin-top: 10px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .status-text { font-size: 12px; color: #334155; }
+    .result-table-wrap {
+      margin-top: 10px;
+      border: 1px solid #e2e8f0;
+      border-radius: 10px;
+      overflow: auto;
+      max-height: 320px;
+      background: #fff;
+    }
+    .result-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+    }
+    .result-table th,
+    .result-table td {
+      border-bottom: 1px solid #e2e8f0;
+      padding: 8px;
+      text-align: left;
+      white-space: nowrap;
+    }
+    .result-table th {
+      position: sticky;
+      top: 0;
+      background: #f1f5f9;
+      color: #0f172a;
+      font-weight: 600;
+    }
+    .field-desc-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      margin-top: 10px;
+    }
+    .field-desc-grid input {
+      width: 100%;
+      box-sizing: border-box;
+      padding-left: 10px;
+    }
+    .view-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 8px;
+    }
+    .view-row button {
+      margin-top: 2px;
+      flex-shrink: 0;
+    }
+    @media (max-width: 980px) {
+      .workspace-grid { grid-template-columns: 1fr; }
+      .field-desc-grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app-container" style="display: block; height: auto;">
+    <header class="topbar" style="position: sticky; top: 0; z-index: 100;">
+      <div class="logo-area">
+        <i class="fa-solid fa-fox fa-lg logo-icon" style="color: #fca5a5;"></i>
+        <h1 style="letter-spacing: 0.5px;" data-i18n="nav_brand">SakuFox 🦊</h1>
+        <span class="badge" style="background: linear-gradient(135deg, #fecaca, #fca5a5); border: none; color: #7f1d1d;">v1.0</span>
+      </div>
+      <div class="nav-menu" style="flex: 1; display: flex; align-items: center; margin-left: 32px; gap: 24px;">
+        <a href="/dashboard" class="nav-link" data-i18n="nav_analysis" style="color: #64748b; text-decoration: none; font-weight: 500; font-size: 15px; padding-bottom: 4px; transition: color 0.2s;" onmouseover="this.style.color='#2b3a4a'" onmouseout="this.style.color='#64748b'">数据分析</a>
+        <a href="/sql-toolbox" class="nav-link active" data-i18n="nav_sql_toolbox" style="color: #2b3a4a; text-decoration: none; font-weight: 600; font-size: 15px; border-bottom: 2px solid #ef4444; padding-bottom: 4px;">SQL 工具箱</a>
+        <a href="/web/knowledge.html" class="nav-link" data-i18n="nav_knowledge" style="color: #64748b; text-decoration: none; font-weight: 500; font-size: 15px; padding-bottom: 4px; transition: color 0.2s;" onmouseover="this.style.color='#2b3a4a'" onmouseout="this.style.color='#64748b'">知识库配置</a>
+      </div>
+      <div class="user-area" style="display: flex; align-items: center; gap: 12px;">
+        <button class="btn btn-outline btn-sm" onclick="i18n.toggle()" style="border-radius: 20px; padding: 4px 12px; font-size: 12px;">
+          <i class="fa-solid fa-language"></i> <span id="langLabel">English / 中文</span>
+        </button>
+        <div id="userInfo" class="user-info"></div>
+      </div>
+    </header>
+
+    <div class="page-wrap">
+      <h2 style="margin: 0; color: #0f172a; font-size: 24px;" data-i18n="sql_toolbox_heading">SQL 工具箱</h2>
+      <div class="intro" data-i18n="sql_toolbox_intro">
+        这里是“验证并沉淀沙盒数据模型”的工作台，不是主分析入口。你可以先验证 SQL 口径，再把结果保存为沙盒分析视图，供后续 AI 分析复用。
+      </div>
+
+      <div class="workspace-grid">
+        <div style="display: flex; flex-direction: column; gap: 16px;">
+          <div class="card-box">
+            <h3 class="card-title"><i class="fa-solid fa-layer-group"></i> <span data-i18n="sql_toolbox_workspace">工作空间</span></h3>
+            <select id="sandboxSelect" class="full-width-select" style="padding-left: 10px;">
+              <option value="">请选择沙盒</option>
+            </select>
+          </div>
+
+          <div class="card-box">
+            <h3 class="card-title"><i class="fa-solid fa-database"></i> <span data-i18n="sql_toolbox_models">可用表 / 视图</span></h3>
+            <ul id="modelList" class="model-list">
+              <li class="list-item">请先选择沙盒</li>
+            </ul>
+          </div>
+
+          <div class="card-box">
+            <h3 class="card-title"><i class="fa-solid fa-clock-rotate-left"></i> <span data-i18n="sql_toolbox_runs">SQL 验证历史</span></h3>
+            <ul id="runList" class="run-list">
+              <li class="list-item">暂无执行记录</li>
+            </ul>
+          </div>
+
+          <div class="card-box">
+            <h3 class="card-title"><i class="fa-solid fa-diagram-project"></i> <span data-i18n="sql_toolbox_views">已保存分析视图</span></h3>
+            <ul id="viewList" class="view-list">
+              <li class="list-item">暂无分析视图</li>
+            </ul>
+          </div>
+        </div>
+
+        <div style="display: flex; flex-direction: column; gap: 16px;">
+          <div class="card-box">
+            <h3 class="card-title"><i class="fa-solid fa-code"></i> <span data-i18n="sql_toolbox_validate">SQL 验证</span></h3>
+            <textarea id="sqlInput" class="sql-input" data-i18n="sql_toolbox_sql_placeholder" placeholder="仅支持单条 SELECT 或 WITH ... SELECT"></textarea>
+            <div class="sql-toolbar">
+              <button id="runBtn" class="btn btn-primary" data-i18n="sql_toolbox_run"><i class="fa-solid fa-play"></i> 运行验证</button>
+              <span id="runStatus" class="status-text" data-i18n="sql_toolbox_waiting">等待执行</span>
+            </div>
+          </div>
+
+          <div class="card-box">
+            <h3 class="card-title"><i class="fa-solid fa-table"></i> <span data-i18n="sql_toolbox_preview">结果预览</span></h3>
+            <div id="resultMeta" class="section-muted" data-i18n="sql_toolbox_not_run">尚未执行</div>
+            <div id="resultTableWrap" class="result-table-wrap" style="display: none;">
+              <table id="resultTable" class="result-table"></table>
+            </div>
+          </div>
+
+          <div class="card-box">
+            <h3 class="card-title"><i class="fa-solid fa-floppy-disk"></i> <span data-i18n="sql_toolbox_save_view">保存为沙盒分析视图</span></h3>
+            <div class="section-muted" data-i18n="sql_toolbox_save_hint">仅可从成功执行记录保存。业务描述必填，字段说明可选。</div>
+            <div style="display: grid; grid-template-columns: 1fr; gap: 8px; margin-top: 10px;">
+              <input id="viewNameInput" data-i18n="sql_toolbox_view_name" placeholder="视图名称（字母/数字/下划线）" style="padding-left: 10px;" />
+              <textarea id="viewDescInput" rows="3" data-i18n="sql_toolbox_view_desc" placeholder="业务描述（必填）" style="width: 100%; box-sizing: border-box; border: 1px solid #cbd5e1; border-radius: 8px; padding: 10px; resize: vertical;"></textarea>
+            </div>
+            <div id="fieldDescGrid" class="field-desc-grid"></div>
+            <div style="margin-top: 10px;">
+              <button id="saveViewBtn" class="btn btn-primary" data-i18n="sql_toolbox_save_btn"><i class="fa-solid fa-bookmark"></i> 保存分析视图</button>
+              <span id="saveStatus" class="status-text" style="margin-left: 8px;" data-i18n="sql_toolbox_not_saved">尚未保存</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/web/common.js"></script>
+  <script>i18n.init();</script>
+  <script src="/web/sql_toolbox.js"></script>
+</body>
+</html>

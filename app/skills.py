@@ -84,6 +84,26 @@ def _build_context_snapshot(user: User, proposal: dict, session_id: str | None) 
             }
         )
 
+    virtual_views_raw = sandbox.get("virtual_views") or []
+    virtual_views: list[dict] = []
+    for view in virtual_views_raw:
+        if not isinstance(view, dict):
+            continue
+        view_name = str(view.get("name") or "").strip()
+        if not view_name:
+            continue
+        virtual_views.append(
+            {
+                "view_id": str(view.get("view_id") or "").strip(),
+                "name": view_name,
+                "description": str(view.get("description") or "").strip(),
+                "source_run_id": str(view.get("source_run_id") or "").strip(),
+                "columns": view.get("columns") or [],
+                "sample_rows": (view.get("sample_rows") or [])[:3],
+                "source_sql_summary": str(view.get("sql") or "").replace("\n", " ").strip()[:320],
+            }
+        )
+
     session_patches = _dedupe_non_empty([str(item) for item in (proposal.get("session_patches") or [])])
     sandbox_business_knowledge = _dedupe_non_empty(store.get_business_knowledge(sandbox_id) if sandbox_id else [])
     report_meta = proposal.get("report_meta") or {}
@@ -119,12 +139,14 @@ def _build_context_snapshot(user: User, proposal: dict, session_id: str | None) 
         },
         "mounted_skills": mounted_skills,
         "knowledge_bases": knowledge_bases,
+        "virtual_views": virtual_views,
         "files": files,
         "context_sources": {
             "selected_tables": bool(selected_tables),
             "selected_files": bool(selected_files),
             "mounted_skills": bool(mounted_skills),
             "knowledge_bases": bool(knowledge_bases),
+            "virtual_views": bool(virtual_views),
             "session_patches": bool(session_patches),
             "sandbox_business_knowledge": bool(sandbox_business_knowledge),
         },
@@ -157,7 +179,23 @@ def save_skill_from_proposal(
     if proposal["status"] != "executed":
         raise ValueError(t("error_not_executed_proposal", default="仅可保存已执行提案"))
 
+    sandbox = store.get_sandbox(str(proposal.get("sandbox_id") or "").strip()) or {}
     inherited_tables = filter_tables_by_user(user, proposal["tables"])
+    sandbox_virtual_view_names = {
+        str(view.get("name") or "").strip()
+        for view in (sandbox.get("virtual_views") or [])
+        if isinstance(view, dict) and str(view.get("name") or "").strip()
+    }
+    sandbox_virtual_view_map = {
+        str(view.get("name") or "").strip(): view
+        for view in (sandbox.get("virtual_views") or [])
+        if isinstance(view, dict) and str(view.get("name") or "").strip()
+    }
+    inherited_tables = _dedupe_non_empty(inherited_tables + [
+        str(table_name)
+        for table_name in (proposal.get("tables") or [])
+        if str(table_name).strip() in sandbox_virtual_view_names
+    ])
     steps = proposal.get("steps", [])
     if not steps:
         for round_payload in proposal.get("loop_rounds", []):
@@ -174,7 +212,13 @@ def save_skill_from_proposal(
     existing_desc_tables = {td["table"] for td in table_descs}
     for table_name in inherited_tables:
         if table_name not in existing_desc_tables:
-            table_descs.append({"table": table_name, "description": ""})
+            virtual_view_info = sandbox_virtual_view_map.get(table_name, {})
+            table_descs.append(
+                {
+                    "table": table_name,
+                    "description": str(virtual_view_info.get("description") or ""),
+                }
+            )
 
     sql_template = ""
     for step in steps:

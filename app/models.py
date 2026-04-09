@@ -101,3 +101,15 @@ class MountKnowledgeBasesRequest(BaseModel):
 
 class MountSkillsRequest(BaseModel):
     skills: list[str]
+
+
+class SQLToolboxExecuteRequest(BaseModel):
+    sandbox_id: str
+    sql: str
+
+
+class SaveVirtualViewRequest(BaseModel):
+    source_run_id: str
+    name: str
+    description: str
+    field_descriptions: dict[str, str] | None = None

@@ -173,9 +173,11 @@ function normalizeStaticText() {
   }
 
   const navAnalysis = document.querySelector('[data-i18n="nav_analysis"]');
+  const navSqlToolbox = document.querySelector('[data-i18n="nav_sql_toolbox"]');
   const navKnowledge = document.querySelector('[data-i18n="nav_knowledge"]');
 
   if (navAnalysis) navAnalysis.textContent = i18n.t("nav_analysis") || "数据分析";
+  if (navSqlToolbox) navSqlToolbox.textContent = i18n.t("nav_sql_toolbox") || "SQL 工具箱";
   if (navKnowledge) navKnowledge.textContent = i18n.t("nav_knowledge") || "知识库配置";
 }
 
@@ -218,6 +220,7 @@ function renderSkillContextSnapshot(snapshot) {
   const files = snapshot.files || [];
   const sessionPatches = snapshot.session_patches || [];
   const contextSources = snapshot.context_sources || {};
+  const virtualViews = snapshot.virtual_views || [];
 
   const sourceSessionId = (source.session_id || "").trim();
   skillSourceSessionId = sourceSessionId;
@@ -233,6 +236,9 @@ function renderSkillContextSnapshot(snapshot) {
     : "-";
   const fileText = files.length
     ? files.map(item => escapeHtml(`${item.name || ""}${item.selected ? " (selected)" : ""}`)).join(", ")
+    : "-";
+  const virtualViewText = virtualViews.length
+    ? virtualViews.map(item => escapeHtml(`${item.name || item.view_id || ""}`)).join(", ")
     : "-";
   const patchText = sessionPatches.length ? escapeHtml(sessionPatches.join(" | ")) : "-";
   const selectedTablesText = (tables.selected_tables || []).length ? escapeHtml((tables.selected_tables || []).join(", ")) : "-";
@@ -253,6 +259,7 @@ function renderSkillContextSnapshot(snapshot) {
     <div><strong>${tr("sandbox_tables_label", "沙盒表")}:</strong> ${sandboxTablesText}</div>
     <div><strong>${tr("mounted_skills_label", "挂载经验")}:</strong> ${mountedText}</div>
     <div><strong>${tr("knowledge_bases_label", "知识库")}:</strong> ${kbText}</div>
+    <div><strong>${tr("virtual_views_label", "分析视图")}:</strong> ${virtualViewText}</div>
     <div><strong>${tr("related_files_label", "关联文件")}:</strong> ${fileText}</div>
     <div><strong>${tr("session_patches_label", "会话补丁")}:</strong> ${patchText}</div>
     <div><strong>${tr("context_sources_label", "上下文来源")}:</strong> ${escapeHtml(sourceFlags)}</div>
@@ -466,8 +473,44 @@ function renderDataModels() {
   }
 
 
+  // 2. Render sandbox virtual views
+  if (currentSandbox && currentSandbox.virtual_views && currentSandbox.virtual_views.length > 0) {
+    hasItems = true;
+    currentSandbox.virtual_views.forEach((view) => {
+      const viewName = (view && view.name) ? String(view.name) : "";
+      if (!viewName) return;
 
-  // 2. Render Uploaded files
+      const div = document.createElement("div");
+      div.style.marginBottom = "6px";
+      div.style.marginTop = "6px";
+      div.style.paddingLeft = "16px";
+
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.value = viewName;
+      cb.id = `chk_view_${viewName}`;
+      cb.style.marginRight = "6px";
+      cb.className = "db-table-checkbox-sidebar";
+      cb.checked = true;
+
+      const label = document.createElement("label");
+      label.htmlFor = `chk_view_${viewName}`;
+      label.style.cursor = "pointer";
+      label.style.fontSize = "13px";
+      label.innerHTML = `<i class="fa-solid fa-diagram-project" style="color:#f59e0b;"></i> ${viewName} (${i18n.t("virtual_view_label") || "分析视图"})`;
+      if (view.description) {
+        label.title = view.description;
+      }
+
+      div.appendChild(cb);
+      div.appendChild(label);
+      tableList.appendChild(div);
+    });
+  }
+
+
+
+  // 3. Render uploaded files
 
   if (uploadedFiles && uploadedFiles.length > 0) {
 

@@ -24,7 +24,7 @@ from typing import Any
 
 
 
-from sqlalchemy import create_engine, select, delete, update
+from sqlalchemy import create_engine, select, delete, update, desc
 
 from sqlalchemy.orm import sessionmaker, Session as SQLASession
 
@@ -46,6 +46,8 @@ from app.db_models import (
     DBProposal,
     DBKnowledgeBase,
     DBDatabaseConnection,
+    DBExecutionRun,
+    DBSandboxVirtualView,
 )
 
 from app.i18n import t
@@ -968,6 +970,337 @@ class DatabaseStore:
             return [item["text"] for item in (sb.business_knowledge or [])]
 
 
+    # ── SQL toolbox execution runs ────────────────────────────────────
+
+
+    def _execution_run_to_dict(self, row: DBExecutionRun) -> dict[str, Any]:
+
+        return self._sanitize_json(
+
+            {
+
+                "run_id": row.run_id,
+
+                "status": row.status,
+
+                "sandbox_id": row.sandbox_id,
+
+                "user_id": row.user_id,
+
+                "sql": row.sql or "",
+
+                "dependencies": row.dependencies or [],
+
+                "row_count": int(row.row_count or 0),
+
+                "columns": row.columns or [],
+
+                "error": row.error or "",
+
+                "duration_ms": int(row.duration_ms or 0),
+
+                "result_preview": row.result_preview or [],
+
+                "created_at": row.created_at,
+
+                "updated_at": row.updated_at,
+
+            }
+
+        )
+
+
+    def create_execution_run(self, data: dict[str, Any]) -> dict[str, Any]:
+
+        run_id = str(data.get("run_id") or f"run_{uuid.uuid4().hex[:12]}")
+
+        now = datetime.now(timezone.utc).isoformat()
+
+        with self.SessionFactory() as sess:
+
+            row = DBExecutionRun(
+
+                run_id=run_id,
+
+                status=str(data.get("status") or "running"),
+
+                sandbox_id=str(data.get("sandbox_id") or ""),
+
+                user_id=str(data.get("user_id") or ""),
+
+                sql=str(data.get("sql") or ""),
+
+                dependencies=self._sanitize_json(data.get("dependencies") or []),
+
+                row_count=int(data.get("row_count") or 0),
+
+                columns=self._sanitize_json(data.get("columns") or []),
+
+                error=str(data.get("error") or ""),
+
+                duration_ms=int(data.get("duration_ms") or 0),
+
+                result_preview=self._sanitize_json(data.get("result_preview") or []),
+
+                created_at=str(data.get("created_at") or now),
+
+                updated_at=now,
+
+            )
+
+            sess.add(row)
+
+            sess.commit()
+
+            return self._execution_run_to_dict(row)
+
+
+    def update_execution_run(self, run_id: str, updates: dict[str, Any]) -> dict[str, Any]:
+
+        with self.SessionFactory() as sess:
+
+            row = sess.get(DBExecutionRun, run_id)
+
+            if not row:
+
+                raise ValueError("Execution run not found")
+
+            for key, value in updates.items():
+
+                if not hasattr(row, key):
+
+                    continue
+
+                if key in {"dependencies", "columns", "result_preview"}:
+
+                    setattr(row, key, self._sanitize_json(value))
+
+                elif key in {"row_count", "duration_ms"} and value is not None:
+
+                    setattr(row, key, int(value))
+
+                else:
+
+                    setattr(row, key, value)
+
+            row.updated_at = datetime.now(timezone.utc).isoformat()
+
+            sess.commit()
+
+            return self._execution_run_to_dict(row)
+
+
+    def get_execution_run(self, run_id: str) -> dict[str, Any] | None:
+
+        with self.SessionFactory() as sess:
+
+            row = sess.get(DBExecutionRun, run_id)
+
+            if not row:
+
+                return None
+
+            return self._execution_run_to_dict(row)
+
+
+    def list_execution_runs(self, sandbox_id: str, *, limit: int = 100) -> list[dict[str, Any]]:
+
+        with self.SessionFactory() as sess:
+
+            rows = sess.execute(
+
+                select(DBExecutionRun)
+
+                .where(DBExecutionRun.sandbox_id == sandbox_id)
+
+                .order_by(desc(DBExecutionRun.created_at))
+
+                .limit(max(1, int(limit or 100)))
+
+            ).scalars().all()
+
+            return [self._execution_run_to_dict(row) for row in rows]
+
+
+    # ── Sandbox virtual views ─────────────────────────────────────────
+
+
+    def _virtual_view_to_dict(self, row: DBSandboxVirtualView) -> dict[str, Any]:
+
+        return self._sanitize_json(
+
+            {
+
+                "view_id": row.view_id,
+
+                "sandbox_id": row.sandbox_id,
+
+                "name": row.name,
+
+                "description": row.description or "",
+
+                "sql": row.sql or "",
+
+                "columns": row.columns or [],
+
+                "sample_rows": row.sample_rows or [],
+
+                "source_run_id": row.source_run_id or "",
+
+                "created_by": row.created_by or "",
+
+                "created_at": row.created_at,
+
+                "updated_at": row.updated_at,
+
+            }
+
+        )
+
+
+    def get_virtual_view(self, sandbox_id: str, view_id: str) -> dict[str, Any] | None:
+
+        with self.SessionFactory() as sess:
+
+            row = sess.get(DBSandboxVirtualView, view_id)
+
+            if not row or row.sandbox_id != sandbox_id:
+
+                return None
+
+            return self._virtual_view_to_dict(row)
+
+
+    def get_virtual_view_by_name(self, sandbox_id: str, name: str) -> dict[str, Any] | None:
+
+        normalized = str(name or "").strip()
+
+        if not normalized:
+
+            return None
+
+        with self.SessionFactory() as sess:
+
+            row = sess.execute(
+
+                select(DBSandboxVirtualView)
+
+                .where(DBSandboxVirtualView.sandbox_id == sandbox_id, DBSandboxVirtualView.name == normalized)
+
+            ).scalar_one_or_none()
+
+            if not row:
+
+                return None
+
+            return self._virtual_view_to_dict(row)
+
+
+    def list_virtual_views(self, sandbox_id: str) -> list[dict[str, Any]]:
+
+        with self.SessionFactory() as sess:
+
+            rows = sess.execute(
+
+                select(DBSandboxVirtualView)
+
+                .where(DBSandboxVirtualView.sandbox_id == sandbox_id)
+
+                .order_by(DBSandboxVirtualView.created_at)
+
+            ).scalars().all()
+
+            return [self._virtual_view_to_dict(row) for row in rows]
+
+
+    def create_virtual_view(self, data: dict[str, Any]) -> dict[str, Any]:
+
+        view_id = str(data.get("view_id") or f"vv_{uuid.uuid4().hex[:12]}")
+
+        now = datetime.now(timezone.utc).isoformat()
+
+        with self.SessionFactory() as sess:
+
+            row = DBSandboxVirtualView(
+
+                view_id=view_id,
+
+                sandbox_id=str(data.get("sandbox_id") or ""),
+
+                name=str(data.get("name") or ""),
+
+                description=str(data.get("description") or ""),
+
+                sql=str(data.get("sql") or ""),
+
+                columns=self._sanitize_json(data.get("columns") or []),
+
+                sample_rows=self._sanitize_json(data.get("sample_rows") or []),
+
+                source_run_id=str(data.get("source_run_id") or ""),
+
+                created_by=str(data.get("created_by") or ""),
+
+                created_at=str(data.get("created_at") or now),
+
+                updated_at=now,
+
+            )
+
+            sess.add(row)
+
+            sess.commit()
+
+            return self._virtual_view_to_dict(row)
+
+
+    def update_virtual_view(self, sandbox_id: str, view_id: str, updates: dict[str, Any]) -> dict[str, Any]:
+
+        with self.SessionFactory() as sess:
+
+            row = sess.get(DBSandboxVirtualView, view_id)
+
+            if not row or row.sandbox_id != sandbox_id:
+
+                raise ValueError("Virtual view not found")
+
+            for key, value in updates.items():
+
+                if not hasattr(row, key):
+
+                    continue
+
+                if key in {"columns", "sample_rows"}:
+
+                    setattr(row, key, self._sanitize_json(value))
+
+                else:
+
+                    setattr(row, key, value)
+
+            row.updated_at = datetime.now(timezone.utc).isoformat()
+
+            sess.commit()
+
+            return self._virtual_view_to_dict(row)
+
+
+    def delete_virtual_view(self, sandbox_id: str, view_id: str) -> bool:
+
+        with self.SessionFactory() as sess:
+
+            row = sess.get(DBSandboxVirtualView, view_id)
+
+            if not row or row.sandbox_id != sandbox_id:
+
+                return False
+
+            sess.delete(row)
+
+            sess.commit()
+
+            return True
+
 
     # ── Proposals ────────────────
 
@@ -1796,6 +2129,32 @@ class DatabaseStore:
 
                 
 
+            for virtual_view in self.list_virtual_views(sandbox_id):
+
+                view_name = str(virtual_view.get("name") or "").strip()
+
+                if not view_name:
+
+                    continue
+
+                context[view_name] = {
+
+                    "type": "virtual_view",
+
+                    "virtual_view": True,
+
+                    "description": str(virtual_view.get("description") or ""),
+
+                    "columns": virtual_view.get("columns") or [],
+
+                    "sample": (virtual_view.get("sample_rows") or [])[:3],
+
+                    "source_run_id": str(virtual_view.get("source_run_id") or ""),
+
+                    "source_sql_summary": str(virtual_view.get("sql") or "").replace("\n", " ").strip()[:320],
+
+                }
+
             return context
 
 
@@ -1899,6 +2258,7 @@ class DatabaseStore:
                     db_connection_summary = self.get_db_connection(sb.db_connection_id)
 
                 legacy_db_connection = sb.db_config or None
+                virtual_views = self.list_virtual_views(sb.sandbox_id)
 
                 return self._sanitize_json({
 
@@ -1922,7 +2282,9 @@ class DatabaseStore:
 
                     "knowledge_bases": sb.knowledge_bases or [],
 
-                    "mounted_skills": sb.mounted_skills or []
+                    "mounted_skills": sb.mounted_skills or [],
+
+                    "virtual_views": virtual_views,
 
                 })
 
@@ -1956,6 +2318,8 @@ class DatabaseStore:
 
         with self.SessionFactory() as sess:
 
+            sess.execute(delete(DBSandboxVirtualView).where(DBSandboxVirtualView.sandbox_id == sandbox_id))
+            sess.execute(delete(DBExecutionRun).where(DBExecutionRun.sandbox_id == sandbox_id))
             result = sess.execute(delete(DBSandbox).where(DBSandbox.sandbox_id == sandbox_id))
 
             sess.commit()

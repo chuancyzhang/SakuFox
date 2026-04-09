@@ -4,6 +4,7 @@ import io
 import sqlite3
 import re
 import uuid
+import time
 from pathlib import Path
 
 import pandas as pd
@@ -46,11 +47,14 @@ from app.models import (
     UpdateKnowledgeBaseRequest,
     MountKnowledgeBasesRequest,
     MountSkillsRequest,
+    SQLToolboxExecuteRequest,
+    SaveVirtualViewRequest,
 )
 from app.notebook_kernel import create_kernel, destroy_kernel
 from app.python_sandbox import run_python_pipeline
 from app.skills import list_skills, save_skill_from_proposal, build_context_snapshot_for_proposal
 from app.tools import execute_select_sql_with_mask
+from app.sql_guard import enforce_select_only, enforce_table_whitelist, extract_tables
 from app.store import User, store
 
 ITERATE_MAX_ROUNDS = 8
@@ -76,6 +80,11 @@ def index() -> FileResponse:
 @app.get("/dashboard")
 def dashboard() -> FileResponse:
     return FileResponse(str(web_dir / "dashboard.html"))
+
+
+@app.get("/sql-toolbox")
+def sql_toolbox_page() -> FileResponse:
+    return FileResponse(str(web_dir / "sql_toolbox.html"))
 
 
 def _dedupe_keep_order(values: list[str]) -> list[str]:
@@ -2251,19 +2260,368 @@ def save_sandbox_tables(
     return {"ok": True, "tables": req.tables}
 
 
+@app.post("/api/sql-toolbox/execute")
+def execute_sql_toolbox(req: SQLToolboxExecuteRequest, user: User = Depends(get_current_user)):
+    sql_text = str(req.sql or "").strip()
+    if not sql_text:
+        raise HTTPException(status_code=400, detail=t("error_empty_code", default="空代码"))
+
+    try:
+        sandbox = assert_sandbox_access(user, req.sandbox_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+
+    run = store.create_execution_run(
+        {
+            "status": "running",
+            "sandbox_id": req.sandbox_id,
+            "user_id": user.user_id,
+            "sql": sql_text,
+            "dependencies": [],
+            "columns": [],
+            "result_preview": [],
+        }
+    )
+    run_id = str(run.get("run_id") or "")
+
+    start_ts = time.perf_counter()
+    try:
+        enforce_select_only(sql_text)
+
+        physical_tables = [str(item) for item in (sandbox.get("tables") or []) if str(item).strip()]
+        virtual_view_names = [
+            str(item.get("name") or "").strip()
+            for item in (sandbox.get("virtual_views") or [])
+            if isinstance(item, dict) and str(item.get("name") or "").strip()
+        ]
+        allowed_entities = physical_tables + [name for name in virtual_view_names if name not in physical_tables]
+        enforce_table_whitelist(sql_text, allowed_entities)
+
+        expansion = _expand_virtual_views_sql(sql_text, req.sandbox_id)
+        expanded_sql = str(expansion.get("expanded_sql") or sql_text)
+        dependencies = _validate_physical_table_whitelist(expanded_sql, sandbox)
+
+        engine = store.get_sandbox_engine(req.sandbox_id)
+        if engine is not None:
+            frame = pd.read_sql(expanded_sql, engine)
+        else:
+            frame = pd.read_sql(expanded_sql, store.conn)
+
+        rows = frame.to_dict(orient="records")
+        columns = [{"name": str(col), "type": str(frame[col].dtype)} for col in frame.columns]
+        preview = rows[:200]
+        duration_ms = int((time.perf_counter() - start_ts) * 1000)
+
+        run = store.update_execution_run(
+            run_id,
+            {
+                "status": "success",
+                "dependencies": dependencies,
+                "row_count": len(rows),
+                "columns": columns,
+                "result_preview": preview,
+                "duration_ms": duration_ms,
+                "error": "",
+            },
+        )
+        run["expanded_sql"] = expanded_sql
+        run["referenced_views"] = expansion.get("referenced_views") or []
+        return {"run": run}
+    except Exception as exc:
+        duration_ms = int((time.perf_counter() - start_ts) * 1000)
+        run = store.update_execution_run(
+            run_id,
+            {
+                "status": "failed",
+                "error": str(exc),
+                "duration_ms": duration_ms,
+                "row_count": 0,
+                "columns": [],
+                "result_preview": [],
+            },
+        )
+        raise HTTPException(status_code=400, detail=str(exc), headers={"X-Run-Id": run.get("run_id", run_id)})
+
+
+@app.get("/api/sql-toolbox/runs")
+def list_sql_toolbox_runs(sandbox_id: str, user: User = Depends(get_current_user)):
+    try:
+        assert_sandbox_access(user, sandbox_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    return {"runs": store.list_execution_runs(sandbox_id, limit=200)}
+
+
+@app.post("/api/sandboxes/{sandbox_id}/virtual-views")
+def create_virtual_view(
+    sandbox_id: str,
+    req: SaveVirtualViewRequest,
+    user: User = Depends(get_current_user),
+):
+    try:
+        sandbox = assert_sandbox_access(user, sandbox_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+
+    view_name = str(req.name or "").strip()
+    if not VIEW_NAME_RE.match(view_name):
+        raise HTTPException(
+            status_code=400,
+            detail="View name must start with a letter/underscore and contain only letters, numbers, underscores.",
+        )
+    description = str(req.description or "").strip()
+    if not description:
+        raise HTTPException(status_code=400, detail="View description is required.")
+
+    source_run = store.get_execution_run(req.source_run_id)
+    if not source_run:
+        raise HTTPException(status_code=404, detail="Execution run not found")
+    if source_run.get("sandbox_id") != sandbox_id:
+        raise HTTPException(status_code=400, detail="Execution run does not belong to the target sandbox")
+    if source_run.get("status") != "success":
+        raise HTTPException(status_code=400, detail="Only successful execution runs can be saved as virtual views")
+
+    if store.get_virtual_view_by_name(sandbox_id, view_name):
+        raise HTTPException(status_code=409, detail=f"Virtual view name already exists: {view_name}")
+
+    physical_tables = {str(item).strip() for item in (sandbox.get("tables") or []) if str(item).strip()}
+    upload_names = {str(item).strip() for item in (sandbox.get("uploads") or {}).keys() if str(item).strip()}
+    if view_name in physical_tables or view_name in upload_names:
+        raise HTTPException(status_code=409, detail=f"Name conflicts with an existing sandbox dataset: {view_name}")
+
+    field_descriptions = req.field_descriptions or {}
+    normalized_field_desc = {str(key).strip(): str(val).strip() for key, val in field_descriptions.items() if str(key).strip()}
+    run_columns = source_run.get("columns") or _column_schema_from_rows(source_run.get("result_preview") or [])
+    columns: list[dict] = []
+    for item in run_columns:
+        if isinstance(item, dict):
+            col_name = str(item.get("name") or "").strip()
+            col_type = str(item.get("type") or "").strip()
+        else:
+            col_name = str(item).strip()
+            col_type = ""
+        if not col_name:
+            continue
+        col_data = {"name": col_name, "type": col_type}
+        col_desc = normalized_field_desc.get(col_name)
+        if col_desc:
+            col_data["description"] = col_desc
+        columns.append(col_data)
+
+    virtual_view = store.create_virtual_view(
+        {
+            "sandbox_id": sandbox_id,
+            "name": view_name,
+            "description": description,
+            "sql": source_run.get("sql", ""),
+            "columns": columns,
+            "sample_rows": (source_run.get("result_preview") or [])[:20],
+            "source_run_id": source_run.get("run_id", ""),
+            "created_by": user.user_id,
+        }
+    )
+    return {"virtual_view": virtual_view}
+
+
+@app.get("/api/sandboxes/{sandbox_id}/virtual-views")
+def list_virtual_views(sandbox_id: str, user: User = Depends(get_current_user)):
+    try:
+        assert_sandbox_access(user, sandbox_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    return {"virtual_views": store.list_virtual_views(sandbox_id)}
+
+
+@app.delete("/api/sandboxes/{sandbox_id}/virtual-views/{view_id}")
+def delete_virtual_view(sandbox_id: str, view_id: str, user: User = Depends(get_current_user)):
+    try:
+        assert_sandbox_access(user, sandbox_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+
+    deleted = store.delete_virtual_view(sandbox_id, view_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Virtual view not found")
+    return {"ok": True}
+
+
 # ── Internal helpers ──────────────────────────────────────────────────
 
 import pandas as pd
 from sqlalchemy import text
 
 
+VIEW_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
+
+
+def _normalize_entity_name(name: str) -> str:
+    return str(name or "").strip().strip('"').strip("`").strip("[").strip("]").lower()
+
+
+def _normalize_base_name(name: str) -> str:
+    text_name = _normalize_entity_name(name)
+    if "." in text_name:
+        return text_name.split(".")[-1]
+    return text_name
+
+
+def _virtual_view_name_map(sandbox_id: str) -> dict[str, dict]:
+    view_map: dict[str, dict] = {}
+    for view in store.list_virtual_views(sandbox_id):
+        view_name = str(view.get("name") or "").strip()
+        if not view_name:
+            continue
+        view_map[_normalize_base_name(view_name)] = view
+    return view_map
+
+
+def _resolve_virtual_view_dependencies(
+    view_key: str,
+    *,
+    view_map: dict[str, dict],
+    ordered: list[str],
+    visiting: set[str],
+    visited: set[str],
+) -> None:
+    if view_key in visited:
+        return
+    if view_key in visiting:
+        cycle_chain = " -> ".join(list(visiting) + [view_key])
+        raise ValueError(f"Virtual view dependency cycle detected: {cycle_chain}")
+
+    visiting.add(view_key)
+    view = view_map[view_key]
+    view_sql = str(view.get("sql") or "")
+    dependencies = extract_tables(view_sql)
+    for dep in dependencies:
+        dep_key = _normalize_base_name(dep)
+        if dep_key in view_map:
+            _resolve_virtual_view_dependencies(
+                dep_key,
+                view_map=view_map,
+                ordered=ordered,
+                visiting=visiting,
+                visited=visited,
+            )
+    visiting.remove(view_key)
+    visited.add(view_key)
+    ordered.append(view_key)
+
+
+def _merge_cte_prefix(sql: str, cte_prefix: str) -> str:
+    sql_text = str(sql or "").strip().rstrip(";")
+    if not sql_text:
+        return sql_text
+
+    if re.match(r"^\s*with\s+recursive\b", sql_text, flags=re.I):
+        return re.sub(
+            r"^\s*with\s+recursive\b",
+            f"WITH RECURSIVE {cte_prefix},",
+            sql_text,
+            count=1,
+            flags=re.I,
+        )
+    if re.match(r"^\s*with\b", sql_text, flags=re.I):
+        return re.sub(r"^\s*with\b", f"WITH {cte_prefix},", sql_text, count=1, flags=re.I)
+    return f"WITH {cte_prefix} {sql_text}"
+
+
+def _expand_virtual_views_sql(sql: str, sandbox_id: str) -> dict[str, object]:
+    enforce_select_only(sql)
+    referenced_entities = extract_tables(sql)
+    view_map = _virtual_view_name_map(sandbox_id)
+    referenced_view_keys: list[str] = []
+    for entity in referenced_entities:
+        key = _normalize_base_name(entity)
+        if key in view_map and key not in referenced_view_keys:
+            referenced_view_keys.append(key)
+
+    ordered: list[str] = []
+    visited: set[str] = set()
+    for view_key in referenced_view_keys:
+        _resolve_virtual_view_dependencies(
+            view_key,
+            view_map=view_map,
+            ordered=ordered,
+            visiting=set(),
+            visited=visited,
+        )
+
+    if not ordered:
+        return {
+            "expanded_sql": str(sql or "").strip().rstrip(";"),
+            "referenced_views": [],
+            "referenced_entities": referenced_entities,
+            "dependency_tables": referenced_entities,
+        }
+
+    cte_segments: list[str] = []
+    for view_key in ordered:
+        view = view_map[view_key]
+        view_name = str(view.get("name") or "").strip()
+        view_sql = str(view.get("sql") or "").strip().rstrip(";")
+        if not view_name or not view_sql:
+            continue
+        cte_segments.append(f"{view_name} AS ({view_sql})")
+
+    if not cte_segments:
+        expanded_sql = str(sql or "").strip().rstrip(";")
+    else:
+        expanded_sql = _merge_cte_prefix(str(sql or ""), ", ".join(cte_segments))
+
+    dependency_tables = extract_tables(expanded_sql)
+    referenced_view_names = [str(view_map[key].get("name") or "") for key in ordered if key in view_map]
+    return {
+        "expanded_sql": expanded_sql,
+        "referenced_views": referenced_view_names,
+        "referenced_entities": referenced_entities,
+        "dependency_tables": dependency_tables,
+    }
+
+
+def _validate_physical_table_whitelist(expanded_sql: str, sandbox: dict) -> list[str]:
+    physical_tables = [str(item) for item in (sandbox.get("tables") or []) if str(item).strip()]
+    return enforce_table_whitelist(expanded_sql, physical_tables)
+
+
+def _column_schema_from_rows(rows: list[dict]) -> list[dict]:
+    if not rows:
+        return []
+    first = rows[0]
+    if not isinstance(first, dict):
+        return []
+    output: list[dict] = []
+    for key, value in first.items():
+        output.append({"name": str(key), "type": type(value).__name__})
+    return output
+
+
 def _query_rows(sql: str, sandbox_id: str | None = None) -> pd.DataFrame:
     """Execute SQL and return a DataFrame. Preserves aliases naturally."""
+    sql_text = str(sql or "").strip()
+    if not sql_text:
+        return pd.DataFrame()
+
     if sandbox_id:
+        sandbox = store.get_sandbox(sandbox_id) or {}
+        expansion = _expand_virtual_views_sql(sql_text, sandbox_id)
+        expanded_sql = str(expansion.get("expanded_sql") or sql_text)
+        _validate_physical_table_whitelist(expanded_sql, sandbox)
         engine = store.get_sandbox_engine(sandbox_id)
         if engine is not None:
-            return pd.read_sql(sql, engine)
-    return pd.read_sql(sql, store.conn)
+            return pd.read_sql(expanded_sql, engine)
+        return pd.read_sql(expanded_sql, store.conn)
+    return pd.read_sql(sql_text, store.conn)
 
 
 def _execute_analysis_steps(
@@ -2381,8 +2739,14 @@ def _execute_analysis_steps(
 
 def _resolve_selected_tables(requested_tables: list[str] | None, sandbox: dict, user: User, max_selected_tables: int) -> list[str]:
     # We already verified sandbox access in the caller via assert_sandbox_access.
-    # Therefore, the user is authorized to access ALL tables registered to this sandbox.
-    allowed_sandbox_tables = list(sandbox.get("tables", []))
+    # Therefore, the user is authorized to access ALL entities registered to this sandbox.
+    physical_tables = [str(item).strip() for item in (sandbox.get("tables", []) or []) if str(item).strip()]
+    virtual_views = [
+        str(item.get("name") or "").strip()
+        for item in (sandbox.get("virtual_views") or [])
+        if isinstance(item, dict) and str(item.get("name") or "").strip()
+    ]
+    allowed_sandbox_tables = physical_tables + [name for name in virtual_views if name not in physical_tables]
     
     if requested_tables is None:
         return allowed_sandbox_tables[:max_selected_tables]
