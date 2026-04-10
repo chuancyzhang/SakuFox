@@ -1,5 +1,7 @@
 import csv
 
+import mimetypes
+
 import sqlite3
 
 import threading
@@ -10,9 +12,13 @@ import json
 
 import math
 
+import re
+
 import base64
 
 import hashlib
+
+import os
 
 from dataclasses import dataclass
 
@@ -21,6 +27,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from typing import Any
+from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 
 
 
@@ -29,6 +36,7 @@ from sqlalchemy import create_engine, select, delete, update, desc
 from sqlalchemy.orm import sessionmaker, Session as SQLASession
 
 from cryptography.fernet import Fernet, InvalidToken
+from sklearn.feature_extraction.text import HashingVectorizer
 
 
 
@@ -47,6 +55,9 @@ from app.db_models import (
     DBKnowledgeBase,
     DBDatabaseConnection,
     DBExecutionRun,
+    DBKnowledgeAsset,
+    DBKnowledgeChunk,
+    DBKnowledgeIndexJob,
     DBSandboxVirtualView,
 )
 
@@ -83,6 +94,13 @@ class DatabaseStore:
         self.SessionFactory = sessionmaker(bind=self.engine)
 
         self._fernet = self._build_fernet(self._config.db_connection_secret_key)
+        self._knowledge_vectorizer = HashingVectorizer(
+            n_features=128,
+            alternate_sign=False,
+            norm="l2",
+            analyzer="char_wb",
+            ngram_range=(2, 4),
+        )
 
         
 
@@ -142,6 +160,7 @@ class DatabaseStore:
         self._seed_sandbox_data()
 
         self._init_default_sandbox()
+        self.refresh_knowledge_assets()
 
 
     def _build_fernet(self, secret_key: str) -> Fernet:
@@ -835,6 +854,8 @@ class DatabaseStore:
 
                 sess.commit()
 
+        self.refresh_knowledge_assets()
+
 
 
     # ── Iteration tracking ────────────────────────────────────────────
@@ -1477,6 +1498,77 @@ class DatabaseStore:
             return p.proposal_id if p else None
 
 
+    def list_user_proposals(self, user_id: str) -> list[dict]:
+
+        with self.SessionFactory() as sess:
+
+            proposals = sess.execute(
+
+                select(DBProposal)
+
+                .where(DBProposal.user_id == user_id)
+
+                .order_by(DBProposal.created_at.desc())
+
+            ).scalars().all()
+
+            return [
+
+                {
+
+                    "proposal_id": p.proposal_id,
+
+                    "user_id": p.user_id,
+
+                    "session_id": p.session_id,
+
+                    "sandbox_id": p.sandbox_id,
+
+                    "message": p.message,
+
+                    "result_rows": p.result_rows,
+
+                    "chart_specs": p.chart_specs,
+
+                    "mode": p.mode or "manual",
+
+                    "tables": p.tables or [],
+
+                    "selected_tables": p.selected_tables or [],
+
+                    "selected_files": p.selected_files or [],
+
+                    "steps": p.steps or [],
+
+                    "explanation": p.explanation or "",
+
+                    "loop_rounds": p.loop_rounds or [],
+
+                    "final_report_md": p.final_report_md or "",
+
+                    "report_title": p.report_title or "",
+
+                    "final_report_html": p.final_report_html or "",
+
+                    "final_report_summary": p.final_report_summary or "",
+
+                    "final_report_chart_bindings": p.final_report_chart_bindings or [],
+
+                    "report_meta": p.report_meta or {},
+
+                    "session_patches": p.session_patches or [],
+
+                    "created_at": p.created_at,
+
+                    "status": p.status,
+
+                }
+
+                for p in proposals
+
+            ]
+
+
     def get_iteration(self, user_id: str, iteration_id: str) -> dict | None:
 
         with self.SessionFactory() as sess:
@@ -1623,6 +1715,8 @@ class DatabaseStore:
 
             sess.commit()
 
+        self.refresh_knowledge_assets()
+
         return skill_id
 
 
@@ -1645,6 +1739,8 @@ class DatabaseStore:
 
                 sess.commit()
 
+                self.refresh_knowledge_assets()
+
                 return self.skills.get(skill_id)
 
             raise ValueError(t("error_skill_not_found", default="经验不存在"))
@@ -1659,7 +1755,13 @@ class DatabaseStore:
 
             sess.commit()
 
-            return result.rowcount > 0
+            deleted = result.rowcount > 0
+
+        if deleted:
+
+            self.refresh_knowledge_assets()
+
+        return deleted
 
 
 
@@ -2159,6 +2261,103 @@ class DatabaseStore:
 
 
 
+    def refresh_knowledge_assets(self) -> None:
+
+        from app.knowledge_assets import refresh_knowledge_assets
+
+        refresh_knowledge_assets(self)
+
+
+    def list_knowledge_assets(self, user_id: str | None = None, user_groups: list[str] | None = None) -> list[dict]:
+
+        from app.knowledge_assets import list_knowledge_assets
+
+        return list_knowledge_assets(self, user_id=user_id, user_groups=user_groups)
+
+
+    def get_knowledge_asset(self, asset_id: str) -> dict | None:
+
+        from app.knowledge_assets import get_knowledge_asset
+
+        return get_knowledge_asset(self, asset_id)
+
+
+    def get_knowledge_index_jobs(self, asset_id: str | None = None, limit: int = 50) -> list[dict]:
+
+        from app.knowledge_assets import get_knowledge_index_jobs
+
+        return get_knowledge_index_jobs(self, asset_id=asset_id, limit=limit)
+
+
+    def get_knowledge_index_overview(self, user_id: str, user_groups: list[str]) -> dict[str, Any]:
+
+        from app.knowledge_assets import get_knowledge_index_overview
+
+        return get_knowledge_index_overview(self, user_id=user_id, user_groups=user_groups)
+
+
+    def get_knowledge_index_asset_detail(self, asset_id: str) -> dict[str, Any] | None:
+
+        from app.knowledge_assets import get_knowledge_index_asset_detail
+
+        return get_knowledge_index_asset_detail(self, asset_id)
+
+
+    def read_knowledge_asset(self, asset_id: str, mode: str = "full", cursor: str | None = None, limit: int = 12000) -> dict[str, Any]:
+
+        from app.knowledge_assets import read_knowledge_asset
+
+        return read_knowledge_asset(self, asset_id=asset_id, mode=mode, cursor=cursor, limit=limit)
+
+
+    def read_knowledge_source(self, locator: str, mode: str = "full", cursor: str | None = None, limit: int = 12000) -> dict[str, Any]:
+
+        from app.knowledge_assets import read_knowledge_source
+
+        return read_knowledge_source(self, locator=locator, mode=mode, cursor=cursor, limit=limit)
+
+
+    def rebuild_knowledge_index(
+        self,
+        *,
+        asset_id: str | None = None,
+        asset_type: str | None = None,
+        sandbox_id: str | None = None,
+    ) -> dict[str, Any]:
+
+        from app.knowledge_assets import rebuild_knowledge_index
+
+        return rebuild_knowledge_index(self, asset_id=asset_id, asset_type=asset_type, sandbox_id=sandbox_id)
+
+
+    def search_knowledge_index(self, query: str, sandbox_id: str, top_k: int = 5) -> list[dict[str, Any]]:
+
+        from app.knowledge_assets import search_knowledge_index
+
+        return search_knowledge_index(self, query=query, sandbox_id=sandbox_id, top_k=top_k)
+
+
+    def get_runtime_asset_ids(self, sandbox_id: str) -> set[str]:
+
+        from app.knowledge_assets import _resolve_runtime_asset_ids
+
+        return _resolve_runtime_asset_ids(self, sandbox_id)
+
+
+    def update_asset_mounts(self, asset_id: str, sandbox_ids: list[str]) -> dict[str, Any]:
+
+        from app.knowledge_assets import update_asset_mounts
+
+        return update_asset_mounts(self, asset_id=asset_id, sandbox_ids=sandbox_ids)
+
+
+    def publish_experience_asset(self, skill_id: str, name: str | None = None, description: str | None = None) -> dict[str, Any]:
+
+        from app.knowledge_assets import publish_experience_asset
+
+        return publish_experience_asset(self, skill_id=skill_id, name=name, description=description)
+
+
     def _sanitize_json(self, o: Any) -> Any:
 
         """Replace NaN, Infinity with None for JSON compliance."""
@@ -2238,6 +2437,8 @@ class DatabaseStore:
             sess.add(new_sb)
 
             sess.commit()
+
+        self.refresh_knowledge_assets()
 
         return sandbox_id
 
@@ -2325,7 +2526,7 @@ class DatabaseStore:
             sess.commit()
 
             if result.rowcount > 0:
-
+                self.refresh_knowledge_assets()
                 return True
 
             return False
@@ -2363,6 +2564,7 @@ class DatabaseStore:
             )
             sess.add(new_kb)
             sess.commit()
+        self.refresh_knowledge_assets()
         return kb_id
 
     def get_knowledge_base(self, kb_id: str) -> dict | None:
@@ -2395,6 +2597,7 @@ class DatabaseStore:
                         setattr(kb, k, v)
                 kb.updated_at = datetime.now(timezone.utc).isoformat()
                 sess.commit()
+                self.refresh_knowledge_assets()
                 return self.get_knowledge_base(kb_id)
             raise ValueError("Knowledge base not found")
 
@@ -2402,7 +2605,10 @@ class DatabaseStore:
         with self.SessionFactory() as sess:
             result = sess.execute(delete(DBKnowledgeBase).where(DBKnowledgeBase.id == kb_id))
             sess.commit()
-            return result.rowcount > 0
+            deleted = result.rowcount > 0
+        if deleted:
+            self.refresh_knowledge_assets()
+        return deleted
 
     def list_knowledge_bases(self) -> list[dict]:
         with self.SessionFactory() as sess:

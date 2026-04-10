@@ -58,6 +58,8 @@ ITERATION_SYSTEM_PROMPT = (
     "- datetime / date / timedelta: 日期类\n"
     "- Counter / defaultdict: collections 常用类\n"
     "- execute_select_sql(sql): 沙盒内执行 SQL，返回 list[dict]\n"
+    "- query_knowledge_index(query, top_k=5): 搜索当前工作空间已挂载的知识资产，返回命中的片段与 asset_id\n"
+    "- read_knowledge_asset(asset_id, mode='preview'): 读取命中知识资产的完整或分页内容\n"
     "- safe_first_row(df): 安全返回首行字典，空表时返回 None\n"
     "- safe_get_value(df, col, default=None): 安全获取某列某行的值，缺列或越界时返回默认值\n"
     "- safe_has_columns(df, *cols): 检查 DataFrame 是否同时包含多个列\n"

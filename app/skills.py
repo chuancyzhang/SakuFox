@@ -237,6 +237,7 @@ def save_skill_from_proposal(
             "tables": table_descs,
             "steps": steps,
             "context_snapshot": context_snapshot,
+            "groups": list(user.groups),
         },
         "sql_template": sql_template,
         "inherited_tables": inherited_tables,

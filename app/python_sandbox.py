@@ -188,6 +188,8 @@ def _export_analysis_scalars(shared_namespace: dict) -> dict[str, object]:
         "publish_df",
         "list_temp_tables",
         "describe_table",
+        "query_knowledge_index",
+        "read_knowledge_asset",
         "safe_first_row",
         "safe_get_value",
         "safe_has_columns",

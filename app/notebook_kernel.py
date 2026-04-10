@@ -13,6 +13,7 @@ import pandas as pd
 
 from app.i18n import t
 from app.python_sandbox import run_python_pipeline
+from app.store import store
 from app.sql_guard import enforce_select_only, enforce_table_whitelist
 from app.tools import execute_select_sql, execute_select_sql_with_mask
 
@@ -261,6 +262,15 @@ class NotebookKernel:
         def describe_table_helper(name: str, source: str = "scratch") -> dict:
             return self.describe_table(name, source)
 
+        def query_knowledge_index_helper(query: str, top_k: int = 5) -> list[dict]:
+            return store.search_knowledge_index(query=str(query or ""), sandbox_id=self.sandbox_id, top_k=top_k)
+
+        def read_knowledge_asset_helper(asset_id: str, mode: str = "preview", cursor: str | None = None, limit: int = 6000) -> dict:
+            allowed_asset_ids = store.get_runtime_asset_ids(self.sandbox_id)
+            if str(asset_id or "") not in allowed_asset_ids:
+                raise RuntimeError(f"knowledge asset not accessible in sandbox: {asset_id}")
+            return store.read_knowledge_asset(asset_id=str(asset_id), mode=mode, cursor=cursor, limit=limit)
+
         result = run_python_pipeline(
             python_code=code,
             shared_namespace=self.shared_namespace,
@@ -274,6 +284,8 @@ class NotebookKernel:
                 "publish_df": publish_df_helper,
                 "list_temp_tables": list_temp_tables_helper,
                 "describe_table": describe_table_helper,
+                "query_knowledge_index": query_knowledge_index_helper,
+                "read_knowledge_asset": read_knowledge_asset_helper,
                 "last_sql_rows": self.shared_namespace.get("last_sql_rows", []),
                 "last_sql_df": self.shared_namespace.get("last_sql_df", pd.DataFrame()),
                 "df": self.shared_namespace.get("df", pd.DataFrame()),

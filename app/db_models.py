@@ -127,6 +127,57 @@ class DBProposal(Base):
     created_at = Column(String(50))
 
 
+class DBKnowledgeAsset(Base):
+    __tablename__ = "knowledge_assets"
+    asset_id = Column(String(50), primary_key=True)
+    asset_type = Column(String(50), index=True)  # enterprise_kb / uploaded_file / experience
+    title = Column(String(255), index=True)
+    description = Column(Text)
+    source_type = Column(String(50), index=True)  # knowledge_base / upload / skill
+    source_ref = Column(String(100), index=True)
+    source_path = Column(String(1000))
+    sandbox_id = Column(String(50), index=True, nullable=True)
+    owner_id = Column(String(50), index=True, nullable=True)
+    permissions = Column(JSON)  # list[str]
+    status = Column(String(20), default="active", index=True)
+    content_type = Column(String(50))
+    content_hash = Column(String(64), index=True)
+    content_preview = Column(Text)
+    metadata_json = Column(JSON)
+    created_at = Column(String(50))
+    updated_at = Column(String(50))
+
+
+class DBKnowledgeChunk(Base):
+    __tablename__ = "knowledge_chunks"
+    chunk_id = Column(String(50), primary_key=True)
+    asset_id = Column(String(50), index=True)
+    chunk_index = Column(Integer, default=0)
+    chunk_text = Column(Text)
+    keywords = Column(JSON)
+    embedding = Column(JSON)
+    source_ref = Column(String(100), index=True)
+    source_path = Column(String(1000))
+    full_document_locator = Column(String(1000))
+    content_hash = Column(String(64), index=True)
+    index_version = Column(Integer, default=1)
+    metadata_json = Column(JSON)
+    created_at = Column(String(50))
+    updated_at = Column(String(50))
+
+
+class DBKnowledgeIndexJob(Base):
+    __tablename__ = "knowledge_index_jobs"
+    job_id = Column(String(50), primary_key=True)
+    asset_id = Column(String(50), index=True, nullable=True)
+    scope = Column(String(50), index=True)  # asset / sandbox / type / all
+    status = Column(String(20), index=True)  # running / success / failed
+    message = Column(Text)
+    stats = Column(JSON)
+    created_at = Column(String(50))
+    updated_at = Column(String(50))
+
+
 class DBExecutionRun(Base):
     __tablename__ = "execution_runs"
     run_id = Column(String(50), primary_key=True)

@@ -103,6 +103,37 @@ class MountSkillsRequest(BaseModel):
     skills: list[str]
 
 
+class UpdateAssetMountsRequest(BaseModel):
+    sandbox_ids: list[str]
+
+
+class PublishExperienceRequest(BaseModel):
+    skill_id: str
+    name: str | None = None
+    description: str | None = None
+
+
+class PublishExperienceFromProposalRequest(BaseModel):
+    proposal_id: str
+    name: str
+    description: str | None = None
+    tags: list[str] | None = None
+    knowledge: list[str] | None = None
+    table_descriptions: list[dict] | None = None
+    mount_sandbox_ids: list[str] | None = None
+
+
+class SearchKnowledgeIndexRequest(BaseModel):
+    query: str
+    sandbox_id: str | None = None
+    top_k: int = Field(default=5, ge=1, le=20)
+
+
+class RebuildKnowledgeIndexRequest(BaseModel):
+    asset_type: str | None = None
+    sandbox_id: str | None = None
+
+
 class SQLToolboxExecuteRequest(BaseModel):
     sandbox_id: str
     sql: str

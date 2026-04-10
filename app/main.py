@@ -47,6 +47,11 @@ from app.models import (
     UpdateKnowledgeBaseRequest,
     MountKnowledgeBasesRequest,
     MountSkillsRequest,
+    UpdateAssetMountsRequest,
+    PublishExperienceRequest,
+    PublishExperienceFromProposalRequest,
+    SearchKnowledgeIndexRequest,
+    RebuildKnowledgeIndexRequest,
     SQLToolboxExecuteRequest,
     SaveVirtualViewRequest,
 )
@@ -87,6 +92,11 @@ def sql_toolbox_page() -> FileResponse:
     return FileResponse(str(web_dir / "sql_toolbox.html"))
 
 
+@app.get("/knowledge-index")
+def knowledge_index_page() -> FileResponse:
+    return FileResponse(str(web_dir / "knowledge_index.html"))
+
+
 def _dedupe_keep_order(values: list[str]) -> list[str]:
     seen: set[str] = set()
     output: list[str] = []
@@ -99,13 +109,92 @@ def _dedupe_keep_order(values: list[str]) -> list[str]:
     return output
 
 
-def _collect_business_knowledge(sandbox: dict, sandbox_id: str, session_patches: list[str] | None = None) -> list[str]:
+def _get_visible_asset_or_404(user: User, asset_id: str) -> dict:
+    assets = store.list_knowledge_assets(user_id=user.user_id, user_groups=user.groups)
+    asset = next((item for item in assets if item.get("asset_id") == asset_id), None)
+    if not asset:
+        raise HTTPException(status_code=404, detail="knowledge asset not found")
+    return asset
+
+
+def _linked_skill_map_by_proposal() -> dict[str, dict]:
+    linked: dict[str, dict] = {}
+    for skill in store.list_skills():
+        proposal_id = str((((skill.get("layers") or {}).get("context_snapshot") or {}).get("source") or {}).get("proposal_id") or "").strip()
+        if proposal_id:
+            linked[proposal_id] = skill
+    return linked
+
+
+def _update_proposal_experience_meta(proposal_id: str, **fields) -> dict:
+    proposal = store.proposals.get(proposal_id)
+    if not proposal:
+        return {}
+    report_meta = dict(proposal.get("report_meta") or {})
+    report_meta.update({key: value for key, value in fields.items() if value is not None})
+    store.update_proposal(proposal_id, {"report_meta": report_meta})
+    return report_meta
+
+
+def _list_pending_experiences(user: User) -> list[dict]:
+    proposals = store.list_user_proposals(user.user_id)
+    linked_skills = _linked_skill_map_by_proposal()
+    pending: list[dict] = []
+    for proposal in proposals:
+        if proposal.get("status") != "executed":
+            continue
+        report_meta = dict(proposal.get("report_meta") or {})
+        if str(report_meta.get("experience_status") or "") == "dismissed":
+            continue
+        proposal_id = str(proposal.get("proposal_id") or "").strip()
+        if not proposal_id or proposal_id in linked_skills:
+            continue
+        result_has_material = bool(
+            str(proposal.get("report_title") or "").strip()
+            or str(proposal.get("final_report_summary") or "").strip()
+            or str(proposal.get("final_report_md") or "").strip()
+            or (proposal.get("steps") or [])
+            or any((round_payload.get("result") or {}).get("conclusions") for round_payload in (proposal.get("loop_rounds") or []))
+            or any((round_payload.get("result") or {}).get("action_items") for round_payload in (proposal.get("loop_rounds") or []))
+        )
+        if not result_has_material:
+            continue
+        sandbox = store.get_sandbox(str(proposal.get("sandbox_id") or "").strip()) or {}
+        pending.append(
+            {
+                "proposal_id": proposal_id,
+                "session_id": proposal.get("session_id") or "",
+                "sandbox_id": proposal.get("sandbox_id") or "",
+                "sandbox_name": sandbox.get("name") or proposal.get("sandbox_id") or "",
+                "message": proposal.get("message") or "",
+                "mode": proposal.get("mode") or "manual",
+                "report_title": proposal.get("report_title") or "",
+                "report_summary": proposal.get("final_report_summary") or "",
+                "created_at": proposal.get("created_at") or "",
+                "selected_tables": proposal.get("selected_tables") or [],
+                "selected_files": proposal.get("selected_files") or [],
+            }
+        )
+    return pending
+
+
+def _collect_business_knowledge(
+    sandbox: dict,
+    sandbox_id: str,
+    message: str,
+    session_patches: list[str] | None = None,
+) -> list[str]:
     knowledge_items: list[str] = []
 
-    for kb_id in sandbox.get("knowledge_bases", []):
-        kb = store.get_knowledge_base(kb_id)
-        if kb and kb.get("content"):
-            knowledge_items.append(f"[{kb.get('name')}]: {kb.get('content')}")
+    indexed_hits = store.search_knowledge_index(query=message, sandbox_id=sandbox_id, top_k=6)
+    for hit in indexed_hits:
+        title = str(hit.get("title") or hit.get("asset_id") or "").strip()
+        snippet = str(hit.get("snippet") or "").strip()
+        locator = str(hit.get("full_document_locator") or "").strip()
+        if title and snippet:
+            knowledge_items.append(f"[Indexed {title}]: {snippet}")
+        if locator:
+            knowledge_items.append(f"[Knowledge Locator]: use read_knowledge_asset('{hit.get('asset_id')}') or {locator}")
 
     knowledge_items.extend(store.get_business_knowledge(sandbox_id))
 
@@ -1416,7 +1505,8 @@ def iterate(req: IterateRequest, user: User = Depends(get_current_user)):
     iteration_history = _build_iteration_context_history(raw_iteration_history)
     
     # Merge sandbox knowledge sources into a single context payload.
-    business_knowledge = _collect_business_knowledge(sandbox, req.sandbox_id, list(session.get("patches", [])))
+    business_knowledge = _collect_business_knowledge(sandbox, req.sandbox_id, message, list(session.get("patches", [])))
+    knowledge_sources = store.search_knowledge_index(query=message, sandbox_id=req.sandbox_id, top_k=3)
 
     def stream_generator():
         try:
@@ -1545,6 +1635,7 @@ def iterate(req: IterateRequest, user: User = Depends(get_current_user)):
                     "result_count": len(result_rows),
                     "rounds_completed": len(loop_rounds),
                     "stop_reason": stop_reason,
+                    "knowledge_sources": knowledge_sources,
                 },
             }, ensure_ascii=False) + "\n"
 
@@ -1607,7 +1698,8 @@ def auto_analyze(req: AutoAnalyzeRequest, user: User = Depends(get_current_user)
     if not message.strip():
         message = _build_default_auto_seed_message(selected_tables, selected_files)
 
-    business_knowledge = _collect_business_knowledge(sandbox, req.sandbox_id, list(session.get("patches", [])))
+    business_knowledge = _collect_business_knowledge(sandbox, req.sandbox_id, message, list(session.get("patches", [])))
+    knowledge_sources = store.search_knowledge_index(query=message, sandbox_id=req.sandbox_id, top_k=3)
 
     def stream_generator():
         try:
@@ -1747,6 +1839,7 @@ def auto_analyze(req: AutoAnalyzeRequest, user: User = Depends(get_current_user)
                     "result_count": len(_get_last_result_rows(loop_rounds)),
                     "report_url": report_url,
                     "report_title": iteration_payload.get("report_title", ""),
+                    "knowledge_sources": knowledge_sources,
                 },
             }, ensure_ascii=False) + "\n"
         except RuntimeError as exc:
@@ -1955,7 +2048,19 @@ def save_skill(req: SaveSkillRequest, user: User = Depends(get_current_user)):
         raise HTTPException(status_code=400, detail=str(exc))
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
-    return {"skill": skill}
+    asset = store.publish_experience_asset(
+        skill_id=skill["skill_id"],
+        name=skill.get("name"),
+        description=skill.get("description"),
+    )
+    _update_proposal_experience_meta(
+        req.proposal_id,
+        experience_status="published",
+        published_skill_id=skill["skill_id"],
+        published_asset_id=asset.get("asset_id"),
+        published_at=asset.get("updated_at"),
+    )
+    return {"skill": skill, "asset": asset}
 
 
 @app.post("/api/skills/propose")
@@ -2890,6 +2995,198 @@ async def sync_knowledge_base(kb_id: str, user: User = Depends(get_current_user)
             
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/knowledge/assets")
+def list_knowledge_assets_api(user: User = Depends(get_current_user)):
+    return {"assets": store.list_knowledge_assets(user_id=user.user_id, user_groups=user.groups)}
+
+
+@app.get("/api/knowledge/assets/{asset_id}")
+def get_knowledge_asset_api(asset_id: str, user: User = Depends(get_current_user)):
+    asset = _get_visible_asset_or_404(user, asset_id)
+    detail = store.get_knowledge_index_asset_detail(asset_id) or asset
+    return detail
+
+
+@app.get("/api/knowledge/assets/{asset_id}/content")
+def get_knowledge_asset_content(
+    asset_id: str,
+    mode: str = "full",
+    cursor: str | None = None,
+    limit: int = 12000,
+    user: User = Depends(get_current_user),
+):
+    _get_visible_asset_or_404(user, asset_id)
+    try:
+        return store.read_knowledge_asset(asset_id=asset_id, mode=mode, cursor=cursor, limit=limit)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@app.post("/api/knowledge/assets/{asset_id}/mounts")
+def update_asset_mounts_api(asset_id: str, req: UpdateAssetMountsRequest, user: User = Depends(get_current_user)):
+    asset = _get_visible_asset_or_404(user, asset_id)
+    allowed_sandbox_ids = {
+        item["sandbox_id"]
+        for item in get_accessible_sandboxes(user)
+    }
+    requested = [sid for sid in req.sandbox_ids if sid in allowed_sandbox_ids]
+    if len(requested) != len(req.sandbox_ids):
+        raise HTTPException(status_code=403, detail="sandbox access denied")
+    try:
+        return store.update_asset_mounts(asset_id=asset["asset_id"], sandbox_ids=requested)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/knowledge/experiences/publish")
+def publish_experience(req: PublishExperienceRequest, user: User = Depends(get_current_user)):
+    skill = store.skills.get(req.skill_id)
+    if not skill:
+        raise HTTPException(status_code=404, detail=t("error_skill_not_found"))
+    if skill["owner_id"] != user.user_id and not set(skill.get("groups") or []).intersection(user.groups):
+        raise HTTPException(status_code=403, detail=t("error_no_permission_skill"))
+    try:
+        asset = store.publish_experience_asset(skill_id=req.skill_id, name=req.name, description=req.description)
+        proposal_id = str((((skill.get("layers") or {}).get("context_snapshot") or {}).get("source") or {}).get("proposal_id") or "").strip()
+        if proposal_id:
+            _update_proposal_experience_meta(
+                proposal_id,
+                experience_status="published",
+                published_skill_id=req.skill_id,
+                published_asset_id=asset.get("asset_id"),
+                published_at=asset.get("updated_at"),
+            )
+        return {"asset": asset}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/api/knowledge/experiences/pending")
+def list_pending_experiences(user: User = Depends(get_current_user)):
+    return {"pending_experiences": _list_pending_experiences(user)}
+
+
+@app.post("/api/knowledge/experiences/publish-from-proposal")
+def publish_experience_from_proposal(req: PublishExperienceFromProposalRequest, user: User = Depends(get_current_user)):
+    proposal = store.proposals.get(req.proposal_id)
+    if not proposal:
+        raise HTTPException(status_code=404, detail="Proposal not found")
+    if proposal.get("user_id") != user.user_id:
+        raise HTTPException(status_code=403, detail=t("error_no_permission_proposal", default="无权访问该提案"))
+
+    try:
+        skill = save_skill_from_proposal(
+            user=user,
+            proposal_id=req.proposal_id,
+            name=req.name,
+            description=req.description,
+            tags=req.tags,
+            extra_knowledge=req.knowledge,
+            table_descriptions=req.table_descriptions,
+            session_id=str(proposal.get("session_id") or "").strip() or None,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+
+    requested_mounts = [str(item).strip() for item in (req.mount_sandbox_ids or []) if str(item).strip()]
+    allowed_sandbox_ids = {item["sandbox_id"] for item in get_accessible_sandboxes(user)}
+    if any(item not in allowed_sandbox_ids for item in requested_mounts):
+        raise HTTPException(status_code=403, detail="sandbox access denied")
+
+    asset = store.publish_experience_asset(
+        skill_id=skill["skill_id"],
+        name=skill.get("name"),
+        description=skill.get("description"),
+    )
+    if requested_mounts:
+        asset = store.update_asset_mounts(asset["asset_id"], requested_mounts)
+    _update_proposal_experience_meta(
+        req.proposal_id,
+        experience_status="published",
+        published_skill_id=skill["skill_id"],
+        published_asset_id=asset.get("asset_id"),
+        published_at=asset.get("updated_at"),
+    )
+    return {"skill": skill, "asset": asset}
+
+
+@app.post("/api/knowledge/experiences/{proposal_id}/dismiss")
+def dismiss_pending_experience(proposal_id: str, user: User = Depends(get_current_user)):
+    proposal = store.proposals.get(proposal_id)
+    if not proposal:
+        raise HTTPException(status_code=404, detail="Proposal not found")
+    if proposal.get("user_id") != user.user_id:
+        raise HTTPException(status_code=403, detail=t("error_no_permission_proposal", default="无权访问该提案"))
+    report_meta = _update_proposal_experience_meta(proposal_id, experience_status="dismissed")
+    return {"proposal_id": proposal_id, "report_meta": report_meta}
+
+
+@app.get("/api/knowledge/index/overview")
+def knowledge_index_overview(user: User = Depends(get_current_user)):
+    return store.get_knowledge_index_overview(user_id=user.user_id, user_groups=user.groups)
+
+
+@app.get("/api/knowledge/index/assets")
+def knowledge_index_assets(user: User = Depends(get_current_user)):
+    return {"assets": store.list_knowledge_assets(user_id=user.user_id, user_groups=user.groups)}
+
+
+@app.get("/api/knowledge/index/assets/{asset_id}")
+def knowledge_index_asset_detail(asset_id: str, user: User = Depends(get_current_user)):
+    _get_visible_asset_or_404(user, asset_id)
+    detail = store.get_knowledge_index_asset_detail(asset_id)
+    if not detail:
+        raise HTTPException(status_code=404, detail="knowledge asset not found")
+    return detail
+
+
+@app.post("/api/knowledge/index/assets/{asset_id}/reindex")
+def reindex_one_asset(asset_id: str, user: User = Depends(get_current_user)):
+    _get_visible_asset_or_404(user, asset_id)
+    return store.rebuild_knowledge_index(asset_id=asset_id)
+
+
+@app.post("/api/knowledge/index/rebuild")
+def rebuild_knowledge_index_api(req: RebuildKnowledgeIndexRequest, user: User = Depends(get_current_user)):
+    sandbox_id = req.sandbox_id
+    if sandbox_id:
+        assert_sandbox_access(user, sandbox_id)
+    return store.rebuild_knowledge_index(asset_type=req.asset_type, sandbox_id=sandbox_id)
+
+
+@app.get("/api/knowledge/index/jobs")
+def knowledge_index_jobs(user: User = Depends(get_current_user)):
+    return {"jobs": store.get_knowledge_index_jobs(limit=100)}
+
+
+@app.post("/api/knowledge/index/search-debug")
+def search_knowledge_index_debug(req: SearchKnowledgeIndexRequest, user: User = Depends(get_current_user)):
+    sandbox_id = str(req.sandbox_id or "").strip()
+    if sandbox_id:
+        assert_sandbox_access(user, sandbox_id)
+        results = store.search_knowledge_index(query=req.query, sandbox_id=sandbox_id, top_k=req.top_k)
+    else:
+        assets = store.list_knowledge_assets(user_id=user.user_id, user_groups=user.groups)
+        results = []
+        for asset in assets[: req.top_k]:
+            results.append(
+                {
+                    "asset_id": asset["asset_id"],
+                    "asset_type": asset["asset_type"],
+                    "title": asset["title"],
+                    "chunk_id": "",
+                    "snippet": asset.get("content_preview", ""),
+                    "score": 0,
+                    "source_ref": asset.get("source_ref", ""),
+                    "source_path": asset.get("source_path", ""),
+                    "full_document_locator": asset.get("full_document_locator", ""),
+                }
+            )
+    return {"results": results}
 
 @app.post("/api/sandboxes/{sandbox_id}/knowledge_bases")
 def mount_knowledge_bases(sandbox_id: str, req: MountKnowledgeBasesRequest, user: User = Depends(get_current_user)):
