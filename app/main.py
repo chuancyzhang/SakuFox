@@ -748,41 +748,15 @@ def _localize_html_bundle_runtime_error(raw_message: str) -> str:
 def _build_report_bundle_from_markdown(markdown_text: str, chart_specs: list[dict]) -> dict:
     is_en = get_lang() == "en"
     default_title = "Analysis Report" if is_en else "分析报告"
-    html_lang = "en" if is_en else "zh-CN"
-    chart_title = "Chart" if is_en else "图表"
     safe_md = str(markdown_text or "").strip()
-    report_title, summary, rendered = _build_polished_report_sections(safe_md, default_title)
-    eyebrow = "AI Analysis Report" if is_en else "AI 分析报告"
-    summary_html = f"<p>{html.escape(summary)}</p>" if summary else ""
+    report_title, summary, _ = _build_polished_report_sections(safe_md, default_title)
     chart_bindings = [
         {"chart_id": f"chart_{idx}", "option": spec, "height": 360}
         for idx, spec in enumerate(chart_specs[:20], start=1)
         if isinstance(spec, dict)
     ]
-    chart_slots = "".join(
-        f'<section style="margin-top:18px;"><h2 style="margin:0 0 8px;">{chart_title} {idx}</h2><div data-chart-id="chart_{idx}"></div></section>'
-        for idx, _ in enumerate(chart_bindings, start=1)
-    )
-    html_doc = (
-        f"<!doctype html><html lang=\"{html_lang}\"><head><meta charset=\"UTF-8\"/>"
-        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\"/>"
-        f"<title>{html.escape(report_title)}</title>"
-        "<style>:root{color-scheme:light}*{box-sizing:border-box}body{font-family:Inter,Arial,sans-serif;margin:0;background:#eef3f8;color:#0f172a}"
-        ".report{max-width:1180px;margin:0 auto;padding:32px 24px 48px}.hero{background:#0f172a;color:#fff;border-radius:8px;padding:34px 38px;margin-bottom:22px;position:relative;overflow:hidden}"
-        ".hero:after{content:\"\";position:absolute;inset:auto -90px -120px auto;width:260px;height:260px;border-radius:50%;background:rgba(14,165,233,.22)}"
-        ".eyebrow{font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:#7dd3fc;font-weight:700;margin-bottom:10px}.hero h1{font-size:34px;line-height:1.25;margin:0;max-width:840px}.hero p{max-width:920px;color:#dbeafe;line-height:1.7;margin:14px 0 0}"
-        ".report-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px}.report-section{background:#fff;border:1px solid #dbe5ef;border-radius:8px;padding:22px 24px;box-shadow:0 12px 34px rgba(15,23,42,.08);position:relative;overflow:hidden}"
-        ".report-section:before{content:\"\";position:absolute;left:0;top:0;bottom:0;width:4px;background:#0ea5e9}.report-section:first-child{grid-column:1/-1}.section-index{font-size:12px;color:#0284c7;font-weight:800;margin-bottom:8px}.report-section h2{margin:0 0 14px;font-size:22px;line-height:1.35}"
-        ".section-body{font-size:15px;line-height:1.75;color:#1f2937}.section-body p{margin:10px 0}.section-body ul,.section-body ol{margin:10px 0 0 22px;padding:0}.section-body li{margin:7px 0}.section-body strong{color:#0f172a}.section-body code{padding:2px 6px;border-radius:5px;background:#e2e8f0;font-family:Consolas,monospace}"
-        ".section-body table{width:100%;border-collapse:separate;border-spacing:0;margin:14px 0;font-size:13px;overflow:hidden;border:1px solid #dbe5ef;border-radius:8px}.section-body th,.section-body td{padding:10px 12px;text-align:left;vertical-align:top;border-bottom:1px solid #e2e8f0}.section-body th{background:#f1f7fb;color:#0f172a;font-weight:800}.section-body tr:last-child td{border-bottom:0}"
-        "section[data-chart-id],div[data-chart-id]{min-height:260px}.report>section{background:#fff;border:1px solid #dbe5ef;border-radius:8px;padding:22px 24px;margin-top:18px;box-shadow:0 12px 34px rgba(15,23,42,.08)}"
-        "@media(max-width:860px){.report{padding:18px 12px 32px}.hero{padding:26px 22px}.hero h1{font-size:28px}.report-grid{grid-template-columns:1fr}}@media print{body{background:#fff}.report{max-width:none;padding:0}.hero,.report-section,.report>section{box-shadow:none;border-color:#d7dee8}}</style>"
-        "</head><body><main class=\"report\">"
-        f"<header class=\"hero\"><div class=\"eyebrow\">{eyebrow}</div><h1>{html.escape(report_title)}</h1>{summary_html}</header>"
-        f"<div class=\"report-grid\">{rendered}</div>"
-        f"{chart_slots}"
-        "</main></body></html>"
-    )
+    chart_slots = "".join(f'<div data-chart-id="chart_{idx}" style="min-height:260px"></div>' for idx, _ in enumerate(chart_bindings, start=1))
+    html_doc = _build_polished_fallback_report_html(safe_md, report_title, chart_slots)
     return {
         "title": report_title,
         "summary": (summary or safe_md[:500]),
@@ -790,6 +764,59 @@ def _build_report_bundle_from_markdown(markdown_text: str, chart_specs: list[dic
         "chart_bindings": chart_bindings,
         "legacy_markdown": safe_md,
     }
+
+
+def _build_polished_fallback_report_html(markdown_text: str, title: str, extra_blocks: str = "") -> str:
+    is_en = get_lang() == "en"
+    html_lang = "en" if is_en else "zh-CN"
+    safe_title = str(title or ("Analysis Report" if is_en else "分析报告")).strip()
+    report_title, summary, rendered = _build_polished_report_sections(markdown_text, safe_title)
+    body_content = rendered or _render_markdown_like_html(str(markdown_text or "").strip()) or "<p></p>"
+    summary_html = f"<p>{html.escape(summary)}</p>" if summary else ""
+    eyebrow = "Autonomous Analysis" if is_en else "一键自动分析"
+    return (
+        f"<!doctype html><html lang=\"{html_lang}\"><head><meta charset=\"UTF-8\"/>"
+        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\"/>"
+        f"<title>{html.escape(report_title)}</title>"
+        "<style>:root{color-scheme:light;--ink:#111827;--muted:#64748b;--line:#dbe4ef;--paper:#f6f8fb;--surface:#ffffff;--accent:#2563eb;--accent2:#14b8a6}"
+        "*{box-sizing:border-box}body{margin:0;font-family:Inter,Segoe UI,Arial,sans-serif;color:var(--ink);background:radial-gradient(circle at 18% 0%,rgba(37,99,235,.16),transparent 28%),linear-gradient(180deg,#f8fbff 0%,#edf2f7 100%);line-height:1.68}"
+        ".report-shell{max-width:1180px;margin:0 auto;padding:34px 22px 58px}.report-hero{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(240px,.65fr);gap:26px;align-items:stretch;margin-bottom:24px}"
+        ".hero-main{background:linear-gradient(135deg,#0f172a 0%,#1d4ed8 58%,#0f766e 100%);color:#fff;border-radius:24px;padding:34px 36px;box-shadow:0 24px 70px rgba(15,23,42,.22);position:relative;overflow:hidden}"
+        ".hero-main:after{content:\"\";position:absolute;right:-80px;bottom:-100px;width:260px;height:260px;border-radius:50%;background:rgba(255,255,255,.16)}.eyebrow{font-size:12px;text-transform:uppercase;letter-spacing:.12em;font-weight:800;color:#bfdbfe;margin-bottom:12px}"
+        "h1{font-size:38px;line-height:1.16;margin:0;letter-spacing:0}.hero-main p{max-width:780px;color:#dbeafe;font-size:15px;margin:18px 0 0}.hero-side{display:grid;gap:14px}.hero-note{background:rgba(255,255,255,.84);border:1px solid rgba(148,163,184,.28);border-radius:20px;padding:22px;box-shadow:0 18px 48px rgba(15,23,42,.10)}"
+        ".hero-note strong{display:block;font-size:13px;color:#2563eb;margin-bottom:8px}.hero-note span{display:block;color:var(--muted);font-size:14px}.content-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px;align-items:start}"
+        ".report-section{background:rgba(255,255,255,.92);border:1px solid rgba(148,163,184,.28);border-radius:18px;padding:24px 26px;box-shadow:0 18px 48px rgba(15,23,42,.08);min-width:0}.report-section:first-child{grid-column:1/-1}"
+        ".section-index{display:inline-flex;align-items:center;justify-content:center;height:26px;min-width:34px;padding:0 10px;border-radius:999px;background:#dbeafe;color:#1d4ed8;font-size:12px;font-weight:900;margin-bottom:12px}.report-section h2{font-size:24px;line-height:1.25;margin:0 0 14px}.section-body{font-size:15px;color:#243042;overflow-wrap:anywhere}.section-body p{margin:10px 0}.section-body ul,.section-body ol{padding-left:22px;margin:10px 0}.section-body li{margin:7px 0}"
+        ".section-body table{width:100%;table-layout:fixed;border-collapse:separate;border-spacing:0;margin:16px 0;border:1px solid var(--line);border-radius:14px;overflow:hidden;background:#fff}.section-body th,.section-body td{padding:12px 14px;border-bottom:1px solid #e7edf5;text-align:left;vertical-align:top;word-break:break-word}.section-body th{background:#f1f6fd;color:#0f172a;font-weight:850}.section-body tr:last-child td{border-bottom:0}"
+        ".chart-zone{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px;margin-top:18px}.chart-zone>[data-chart-id],.chart-zone>div{background:#fff;border:1px solid rgba(148,163,184,.28);border-radius:18px;box-shadow:0 18px 48px rgba(15,23,42,.08);padding:12px;min-height:320px}[data-chart-id]{width:100%;min-height:320px}"
+        "@media(max-width:860px){.report-shell{padding:18px 12px 36px}.report-hero,.content-grid,.chart-zone{grid-template-columns:1fr}.hero-main{padding:28px 24px;border-radius:20px}h1{font-size:30px}.report-section{padding:20px}}@media print{body{background:#fff}.report-shell{max-width:none;padding:0}.hero-main,.hero-note,.report-section,.chart-zone>[data-chart-id],.chart-zone>div{box-shadow:none;break-inside:avoid-page}}</style>"
+        "</head><body><main class=\"report-shell\">"
+        f"<section class=\"report-hero\"><div class=\"hero-main\"><div class=\"eyebrow\">{eyebrow}</div><h1>{html.escape(report_title)}</h1>{summary_html}</div>"
+        f"<aside class=\"hero-side\"><div class=\"hero-note\"><strong>{'Evidence-based' if is_en else '基于迭代证据'}</strong><span>{'Generated from completed analysis rounds and verified execution output.' if is_en else '根据已完成的分析轮次、执行结果和可用图表整理。'}</span></div>"
+        f"<div class=\"hero-note\"><strong>{'Chart-ready' if is_en else '图表可挂载'}</strong><span>{'Visual placeholders remain available for host-rendered ECharts.' if is_en else '保留图表挂载点，由页面宿主渲染 ECharts。'}</span></div></aside></section>"
+        f"<section class=\"content-grid\">{body_content}</section>"
+        f"{f'<section class=\"chart-zone\">{extra_blocks}</section>' if extra_blocks else ''}"
+        "</main></body></html>"
+    )
+
+
+def _build_minimal_report_html(markdown_text: str, title: str, extra_blocks: str = "") -> str:
+    is_en = get_lang() == "en"
+    html_lang = "en" if is_en else "zh-CN"
+    safe_title = str(title or ("Analysis Report" if is_en else "分析报告")).strip()
+    body_html = _render_markdown_like_html(str(markdown_text or "").strip()) or "<p></p>"
+    return (
+        f"<!doctype html><html lang=\"{html_lang}\"><head><meta charset=\"UTF-8\"/>"
+        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\"/>"
+        f"<title>{html.escape(safe_title)}</title>"
+        "<style>*{box-sizing:border-box}body{margin:0;font-family:Arial,sans-serif;color:#111827;background:#fff;line-height:1.65}"
+        "main{max-width:960px;margin:0 auto;padding:32px 20px}h1{font-size:28px;line-height:1.25;margin:0 0 20px}"
+        "h2,h3{line-height:1.35;margin:24px 0 10px}p,ul,ol,table{margin:12px 0}table{width:100%;border-collapse:collapse}"
+        "th,td{border:1px solid #e5e7eb;padding:8px 10px;text-align:left;vertical-align:top}th{background:#f9fafb}"
+        "pre{white-space:pre-wrap;overflow-wrap:anywhere}code{background:#f3f4f6;padding:1px 4px;border-radius:4px}"
+        "[data-chart-id]{width:100%;min-height:260px;margin:18px 0}</style>"
+        f"</head><body><main><h1>{html.escape(safe_title)}</h1>{body_html}{extra_blocks}</main></body></html>"
+    )
 
 
 def _strip_markdown_to_plain_text(markdown_text: str) -> str:
@@ -1091,27 +1118,13 @@ def _ensure_chart_placeholders_in_report_html(html_document: str, chart_bindings
     if not missing_ids:
         return html_text
 
-    is_en = get_lang() == "en"
-    chart_label = "Chart" if is_en else "图表"
-    charts_label = "Charts" if is_en else "图表"
-    section_items = "".join(
-        (
-            f'<section style="margin-top:18px;">'
-            f'<h3 style="margin:0 0 8px;">{chart_label} {idx}</h3>'
-            f'<div data-chart-id="{html.escape(chart_id)}"></div>'
-            "</section>"
-        )
-        for idx, chart_id in enumerate(missing_ids, start=1)
-    )
-    chart_section = (
-        '<section style="margin-top:22px;">'
-        f'<h2 style="margin:0 0 10px;">{charts_label}</h2>'
-        f"{section_items}"
-        "</section>"
+    chart_placeholders = "".join(
+        f'<div data-chart-id="{html.escape(chart_id)}" style="min-height:260px"></div>'
+        for chart_id in missing_ids
     )
     if "</body>" in html_text.lower():
-        return re.sub(r"</body>", chart_section + "</body>", html_text, count=1, flags=re.IGNORECASE)
-    return html_text + chart_section
+        return re.sub(r"</body>", chart_placeholders + "</body>", html_text, count=1, flags=re.IGNORECASE)
+    return html_text + chart_placeholders
 
 
 def _build_skill_proposal_fallback(

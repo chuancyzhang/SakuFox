@@ -145,6 +145,121 @@
     return response.json();
   }
 
+  function cloneChartOption(option) {
+    if (!option || typeof option !== "object") return {};
+    try {
+      return structuredClone(option);
+    } catch (_) {
+      try {
+        return JSON.parse(JSON.stringify(option));
+      } catch (_) {
+        return { ...option };
+      }
+    }
+  }
+
+  function parseCssColor(value) {
+    const text = String(value || "").trim();
+    const match = text.match(/^rgba?\(([^)]+)\)$/i);
+    if (!match) return null;
+    const parts = match[1].split(",").map((item) => parseFloat(item.trim()));
+    if (parts.length < 3 || parts.some((item, index) => index < 3 && Number.isNaN(item))) return null;
+    const alpha = parts.length >= 4 && !Number.isNaN(parts[3]) ? parts[3] : 1;
+    if (alpha <= 0.05) return null;
+    return { r: parts[0], g: parts[1], b: parts[2] };
+  }
+
+  function isDarkChartHost(host) {
+    let node = host;
+    const view = host?.ownerDocument?.defaultView || window;
+    while (node && node.nodeType === 1) {
+      const color = parseCssColor(view.getComputedStyle(node).backgroundColor);
+      if (color) {
+        const luminance = (0.2126 * color.r + 0.7152 * color.g + 0.0722 * color.b) / 255;
+        return luminance < 0.45;
+      }
+      node = node.parentElement;
+    }
+    return false;
+  }
+
+  function asArray(value) {
+    if (!value) return [];
+    return Array.isArray(value) ? value : [value];
+  }
+
+  function prepareChartOption(option, darkHost) {
+    const patched = cloneChartOption(option);
+    const textColor = darkHost ? "#e5eefb" : "#243042";
+    const mutedColor = darkHost ? "#9fb0c8" : "#64748b";
+    const gridColor = darkHost ? "rgba(229,238,251,.18)" : "rgba(100,116,139,.18)";
+    patched.backgroundColor = patched.backgroundColor || "transparent";
+    patched.textStyle = { ...(patched.textStyle || {}), color: patched.textStyle?.color || textColor };
+    patched.color = patched.color || ["#60a5fa", "#34d399", "#fbbf24", "#f472b6", "#a78bfa", "#22d3ee", "#fb7185"];
+    asArray(patched.title).forEach((item) => {
+      if (!item || typeof item !== "object") return;
+      item.textStyle = { ...(item.textStyle || {}), color: item.textStyle?.color || textColor };
+      item.subtextStyle = { ...(item.subtextStyle || {}), color: item.subtextStyle?.color || mutedColor };
+    });
+    asArray(patched.legend).forEach((item) => {
+      if (!item || typeof item !== "object") return;
+      item.textStyle = { ...(item.textStyle || {}), color: item.textStyle?.color || textColor };
+    });
+    ["xAxis", "yAxis", "radiusAxis", "angleAxis"].forEach((key) => {
+      asArray(patched[key]).forEach((axis) => {
+        if (!axis || typeof axis !== "object") return;
+        axis.axisLabel = { ...(axis.axisLabel || {}), color: axis.axisLabel?.color || mutedColor };
+        axis.nameTextStyle = { ...(axis.nameTextStyle || {}), color: axis.nameTextStyle?.color || mutedColor };
+        axis.axisLine = {
+          ...(axis.axisLine || {}),
+          lineStyle: { ...(axis.axisLine?.lineStyle || {}), color: axis.axisLine?.lineStyle?.color || gridColor },
+        };
+        axis.splitLine = {
+          ...(axis.splitLine || {}),
+          lineStyle: { ...(axis.splitLine?.lineStyle || {}), color: axis.splitLine?.lineStyle?.color || gridColor },
+        };
+      });
+    });
+    asArray(patched.series).forEach((series) => {
+      if (!series || typeof series !== "object") return;
+      series.label = { ...(series.label || {}), color: series.label?.color || textColor };
+    });
+    return patched;
+  }
+
+  function makeChartMountVisible(host, mount, height) {
+    host.style.setProperty("display", "block", "important");
+    host.style.setProperty("position", "relative", "important");
+    host.style.setProperty("width", "100%", "important");
+    host.style.setProperty("min-height", `${height}px`, "important");
+    host.style.setProperty("overflow", "visible", "important");
+    mount.style.setProperty("display", "block", "important");
+    mount.style.setProperty("position", "relative", "important");
+    mount.style.setProperty("width", "100%", "important");
+    mount.style.setProperty("height", `${height}px`, "important");
+    mount.style.setProperty("min-height", `${height}px`, "important");
+    mount.style.setProperty("opacity", "1", "important");
+    mount.style.setProperty("visibility", "visible", "important");
+  }
+
+  function revealRenderedChart(mount, chart) {
+    const reveal = () => {
+      mount.querySelectorAll("canvas,svg").forEach((node) => {
+        node.style.setProperty("display", "block", "important");
+        node.style.setProperty("opacity", "1", "important");
+        node.style.setProperty("visibility", "visible", "important");
+      });
+      try {
+        chart.resize();
+      } catch (_) {
+        // no-op
+      }
+    };
+    reveal();
+    setTimeout(reveal, 80);
+    setTimeout(reveal, 300);
+  }
+
   function mountCharts(iframeDoc, bindings, lang) {
     if (!window.echarts || !Array.isArray(bindings)) return;
     let chartSection = null;
@@ -182,11 +297,11 @@
       const height = Math.max(200, Math.min(1200, parseInt(binding.height || 360, 10) || 360));
       host.innerHTML = "";
       const mount = iframeDoc.createElement("div");
-      mount.style.width = "100%";
-      mount.style.height = `${height}px`;
+      makeChartMountVisible(host, mount, height);
       host.appendChild(mount);
       const chart = echarts.init(mount);
-      chart.setOption(option);
+      chart.setOption(prepareChartOption(option, isDarkChartHost(host)), true);
+      revealRenderedChart(mount, chart);
     });
   }
 

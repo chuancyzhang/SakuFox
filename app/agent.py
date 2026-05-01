@@ -1057,12 +1057,14 @@ def generate_auto_analysis_report_bundle(
     history_block = "\n".join(history_lines) or "- N/A"
     chart_ids = [f"chart_{idx}" for idx, spec in enumerate(chart_specs[:20], start=1) if isinstance(spec, dict)]
     chart_hint = ", ".join(chart_ids) if chart_ids else "none"
-    default_chart_bindings = [
-        {"chart_id": f"chart_{idx}", "option": spec, "height": 360}
-        for idx, spec in enumerate(chart_specs[:20], start=1)
-        if isinstance(spec, dict)
-    ]
-
+    chart_specs_block = json.dumps(
+        [
+            {"chart_id": f"chart_{idx}", "option": spec}
+            for idx, spec in enumerate(chart_specs[:20], start=1)
+            if isinstance(spec, dict)
+        ],
+        ensure_ascii=False,
+    )[:20000]
     iteration_materials: list[dict] = []
     for round_payload in loop_rounds:
         result = round_payload.get("result") or {}
@@ -1159,19 +1161,21 @@ def generate_auto_analysis_report_bundle(
         stage1_bundle["action_items"] = _extract_action_items({"action_items": _merge_loop_items("action_items")})
 
     stage2_system_prompt = (
-        "You are a principal analytics web designer. Produce only JSON with chart_bindings and html_document. "
+        "You are a principal analytics web designer. Produce only JSON for a self-contained analytics report. "
         "Design the standalone HTML report from the completed iteration results themselves. "
-        "Do not follow a fixed report template; choose the structure, narrative flow, and visual treatment that best fit the evidence."
+        "Choose the structure, narrative flow, and visual treatment that best fit the evidence; never follow a fixed report template."
     )
     stage2_user_prompt = (
         "Return valid JSON only. No markdown fences.\n"
         "Schema:\n"
         "{"
+        "\"title\": string, "
+        "\"summary\": string, "
         "\"chart_bindings\": [{\"chart_id\": string, \"option\": object, \"height\": number}], "
         "\"html_document\": string"
         "}\n\n"
-        f"Report title:\n{stage1_bundle['title']}\n\n"
-        f"Report summary:\n{stage1_bundle['summary']}\n\n"
+        f"Draft report title for context, not a required final title:\n{stage1_bundle['title']}\n\n"
+        f"Draft report summary for context, not a required final summary:\n{stage1_bundle['summary']}\n\n"
         f"Conclusions:\n{json.dumps(stage1_bundle['conclusions'], ensure_ascii=False)}\n\n"
         f"Action items:\n{json.dumps(stage1_bundle['action_items'], ensure_ascii=False)}\n\n"
         f"Original request:\n{message}\n\n"
@@ -1186,12 +1190,16 @@ def generate_auto_analysis_report_bundle(
         f"Output language requirement: {report_language}. Keep title/summary/body in this language.\n\n"
         "Chart mounting rule:\n"
         f"- Available chart ids: {chart_hint}.\n"
+        f"- Available chart specs JSON:\n{chart_specs_block}\n"
         "- When a chart supports the story you choose, place a chart node in html_document with data-chart-id=\"...\".\n"
         "- chart_bindings should map every used chart_id to an ECharts option and height.\n"
         "- You may omit irrelevant charts, but do not invent chart ids.\n\n"
         "HTML quality requirements:\n"
         "- Return a complete standalone HTML document with <!doctype html>, <html>, <head>, <style>, and <body>.\n"
-        "- Make it beautiful, readable, and suited to the analysis outcome; decide the layout, sections, typography, emphasis, and visual rhythm yourself.\n"
+        "- Make it a polished visual analytics web report, not a plain white paper or Markdown-to-HTML document.\n"
+        "- Decide the layout, sections, typography, emphasis, and visual rhythm yourself; use substantial CSS for spacing, hierarchy, surfaces, tables, and chart areas.\n"
+        "- Include a designed first viewport with strong report identity and at least one visual summary treatment such as KPI bands, insight panels, split layouts, or editorial callouts when supported by the evidence.\n"
+        "- Do not include external scripts, external stylesheets, or inline JavaScript; charts are mounted by the host application.\n"
         "- Do NOT include raw Markdown syntax anywhere in visible text: no ## headings, no **bold**, no pipe tables like | a | b |, and no ``` fences.\n"
         "- Convert any tabular content into real <table><thead><tbody> HTML.\n"
         "- Keep content faithful to the iteration evidence; do not add unsupported claims."
@@ -1213,26 +1221,77 @@ def generate_auto_analysis_report_bundle(
         "legacy_markdown": fallback_markdown,
     }
     if not stage2_parsed:
-        return combined_fallback
+        repaired_raw = _repair_report_bundle_json(
+            raw_response=stage2_raw,
+            fallback_markdown=stage1_bundle["legacy_markdown"],
+            provider=selected_provider,
+            model=model,
+            config=config,
+            report_language=report_language,
+        )
+        stage2_parsed = _parse_report_bundle_json(repaired_raw)
+    if not stage2_parsed:
+        repaired_html = _generate_html_document_by_llm(
+            fallback_markdown=stage1_bundle["legacy_markdown"],
+            report_context={
+                "title": stage1_bundle["title"],
+                "summary": stage1_bundle["summary"],
+                "conclusions": stage1_bundle["conclusions"],
+                "action_items": stage1_bundle["action_items"],
+                "original_request": message,
+                "stop_reason": stop_reason,
+                "rounds_completed": rounds_completed,
+                "loop_rounds_summary": summary_rounds,
+                "structured_iteration_results": iteration_materials,
+                "final_result_rows_preview": final_result_rows[:20],
+                "previous_html_attempt": stage2_raw,
+            },
+            chart_specs=chart_specs,
+            provider=selected_provider,
+            model=model,
+            config=config,
+            report_language=report_language,
+        )
+        if repaired_html:
+            stage2_parsed = {
+                "title": stage1_bundle["title"],
+                "summary": stage1_bundle["summary"],
+                "html_document": repaired_html,
+                "chart_bindings": [],
+            }
+        else:
+            return combined_fallback
 
+    raw_ai_html = str(stage2_parsed.get("html_document", "") or "").strip()
     stage2_bundle = _normalize_report_bundle(stage2_parsed, combined_fallback, chart_specs)
-    stage2_bundle["title"] = stage1_bundle["title"]
-    stage2_bundle["summary"] = stage1_bundle["summary"]
+    stage2_bundle["title"] = str(stage2_bundle.get("title", "") or stage1_bundle["title"] or default_title)
+    stage2_bundle["summary"] = str(stage2_bundle.get("summary", "") or stage1_bundle["summary"])
     stage2_bundle["conclusions"] = stage1_bundle["conclusions"]
     stage2_bundle["action_items"] = stage1_bundle["action_items"]
-    stage2_bundle["legacy_markdown"] = fallback_markdown
-    if not stage2_bundle.get("chart_bindings"):
-        stage2_bundle["chart_bindings"] = default_chart_bindings
+    stage2_bundle["legacy_markdown"] = stage1_bundle["legacy_markdown"] or fallback_markdown
 
     stage2_bundle["html_document"] = _ensure_chart_placeholders(
         stage2_bundle.get("html_document", ""),
         stage2_bundle.get("chart_bindings", []),
     )
-    is_qualified = _is_standalone_html_document(stage2_bundle.get("html_document", ""))
+    is_qualified = bool(raw_ai_html) and _is_polished_html_document(stage2_bundle.get("html_document", ""))
     if not is_qualified:
         for _ in range(2):
             repaired_html = _generate_html_document_by_llm(
                 fallback_markdown=stage1_bundle["legacy_markdown"],
+                report_context={
+                    "title": stage2_bundle.get("title", ""),
+                    "summary": stage2_bundle.get("summary", ""),
+                    "conclusions": stage1_bundle["conclusions"],
+                    "action_items": stage1_bundle["action_items"],
+                    "original_request": message,
+                    "stop_reason": stop_reason,
+                    "rounds_completed": rounds_completed,
+                    "loop_rounds_summary": summary_rounds,
+                    "structured_iteration_results": iteration_materials,
+                    "final_result_rows_preview": final_result_rows[:20],
+                    "previous_html_attempt": raw_ai_html,
+                },
                 chart_specs=chart_specs,
                 provider=selected_provider,
                 model=model,
@@ -1245,12 +1304,20 @@ def generate_auto_analysis_report_bundle(
                 repaired_html,
                 stage2_bundle.get("chart_bindings", []),
             )
-            is_qualified = _is_standalone_html_document(stage2_bundle.get("html_document", ""))
+            is_qualified = _is_polished_html_document(stage2_bundle.get("html_document", ""))
             if is_qualified:
                 break
 
     if not is_qualified:
-        raise RuntimeError("report bundle generation failed after 3 attempts")
+        fallback_html = _build_polished_fallback_report_html(
+            stage1_bundle["legacy_markdown"] or fallback_markdown,
+            title=stage2_bundle.get("title", "") or default_title,
+        )
+        stage2_bundle["html_document"] = _ensure_chart_placeholders(
+            fallback_html,
+            stage2_bundle.get("chart_bindings", []),
+        )
+        is_qualified = _is_standalone_html_document(stage2_bundle.get("html_document", ""))
 
     if not _is_standalone_html_document(stage2_bundle.get("html_document", "")):
         stage2_bundle["html_document"] = _wrap_html_fragment_as_document(stage2_bundle.get("html_document", ""))
@@ -1300,6 +1367,44 @@ def _is_standalone_html_document(text: str) -> bool:
     if not re.search(r"<!doctype html[\s\S]*?</html>|<html[\s\S]*?</html>", html_text, re.IGNORECASE):
         return False
     return "<body" in html_text.lower()
+
+
+def _is_polished_html_document(text: str) -> bool:
+    html_text = str(text or "").strip()
+    if not _is_standalone_html_document(html_text):
+        return False
+    style_blocks = re.findall(r"<style[^>]*>([\s\S]*?)</style>", html_text, flags=re.IGNORECASE)
+    style_text = "\n".join(style_blocks)
+    if len(style_text.strip()) < 500:
+        return False
+    design_signals = (
+        "display:grid",
+        "display: grid",
+        "display:flex",
+        "display: flex",
+        "box-shadow",
+        "border-radius",
+        "linear-gradient",
+        "gap:",
+        "grid-template",
+        "backdrop-filter",
+        "position:",
+    )
+    signal_count = sum(1 for token in design_signals if token in style_text.lower())
+    if signal_count < 4:
+        return False
+    body_match = re.search(r"<body[^>]*>([\s\S]*?)</body>", html_text, flags=re.IGNORECASE)
+    visible_html = body_match.group(1) if body_match else html_text
+    if not re.search(r'class=["\'][^"\']+["\']', visible_html, flags=re.IGNORECASE):
+        return False
+    plain_doc_markers = (
+        "<hr",
+        "<h1>分析报告</h1>",
+        "<h1>Analysis Report</h1>",
+    )
+    if any(marker.lower() in visible_html.lower() for marker in plain_doc_markers) and signal_count < 6:
+        return False
+    return True
 
 
 def _html_contains_markdown_artifacts(text: str) -> bool:
@@ -1508,6 +1613,7 @@ def _repair_report_bundle_json(
 
 def _generate_html_document_by_llm(
     fallback_markdown: str,
+    report_context: dict | None,
     chart_specs: list[dict],
     provider: str,
     model: str | None,
@@ -1516,24 +1622,38 @@ def _generate_html_document_by_llm(
 ) -> str:
     chart_ids = [f"chart_{idx}" for idx, spec in enumerate(chart_specs[:20], start=1) if isinstance(spec, dict)]
     chart_hint = ", ".join(chart_ids) if chart_ids else "none"
+    chart_specs_block = json.dumps(
+        [
+            {"chart_id": f"chart_{idx}", "option": spec}
+            for idx, spec in enumerate(chart_specs[:20], start=1)
+            if isinstance(spec, dict)
+        ],
+        ensure_ascii=False,
+    )[:20000]
+    context_block = json.dumps(report_context or {}, ensure_ascii=False, default=str)[:30000]
     system_prompt = (
         "You are a data-report web designer. Return a standalone HTML document only. "
-        "Choose the HTML structure and visual style based on the source report content. Do not include JavaScript."
+        "Redesign the report from the analysis evidence. Choose the HTML structure and visual style yourself. "
+        "Do not include JavaScript."
     )
     user_prompt = (
-        "Convert the following report content into a complete HTML document.\n"
+        "Create a complete standalone HTML document from the completed analysis evidence.\n"
         "Requirements:\n"
         "- Return only HTML text.\n"
-        "- Use clear visual hierarchy and polished CSS that fit the analysis outcome.\n"
-        "- Decide the layout, sectioning, emphasis, and table treatment yourself; do not force a fixed report template.\n"
+        "- Use substantial, polished CSS that fit the analysis outcome; this must look like a designed analytics web report, not a plain white document.\n"
+        "- Decide the layout, sectioning, emphasis, and table treatment yourself; do not use a fixed report template.\n"
+        "- Include strong first-screen identity, designed surfaces, clear spacing, responsive layout, styled tables, and chart areas when charts support the story.\n"
+        "- Do not include external scripts, external stylesheets, or inline JavaScript.\n"
         "- Do NOT include raw Markdown syntax in visible text: no ##, no **bold**, no |---| pipe tables, and no ``` fences.\n"
         "- Convert any markdown table into a real <table><thead><tbody> structure.\n"
-        "- Keep content faithful to source.\n"
+        "- Keep content faithful to the evidence; do not add unsupported claims.\n"
         f"- Use {report_language} for the whole document text.\n"
         "- Include chart placeholders using available chart ids when they support the report story: <div data-chart-id=\"...\"></div>.\n"
         "- Do not invent chart ids.\n"
-        f"Available chart ids: {chart_hint}\n\n"
-        f"Source report markdown:\n{fallback_markdown}\n"
+        f"Available chart ids: {chart_hint}\n"
+        f"Available chart specs JSON:\n{chart_specs_block}\n\n"
+        f"Structured report context:\n{context_block}\n\n"
+        f"Fallback source markdown, for evidence only:\n{fallback_markdown}\n"
     )
     chunks = (
         _call_openai_protocol(system_prompt=system_prompt, user_prompt=user_prompt, model=model, config=config)
@@ -1583,9 +1703,6 @@ def _ensure_chart_placeholders(html_document: str, chart_bindings: list[dict]) -
     html_text = str(html_document or "")
     if not html_text or not chart_bindings:
         return html_text
-    is_en = get_lang() == "en"
-    chart_label = "Chart" if is_en else "图表"
-    charts_label = "Charts" if is_en else "图表"
     existing_ids = set(re.findall(r'data-chart-id=["\']([^"\']+)["\']', html_text, flags=re.IGNORECASE))
     missing_ids = [
         str(item.get("chart_id", "")).strip()
@@ -1594,24 +1711,13 @@ def _ensure_chart_placeholders(html_document: str, chart_bindings: list[dict]) -
     ]
     if not missing_ids:
         return html_text
-    section_items = "".join(
-        (
-            f'<section style="margin-top:18px;">'
-            f'<h3 style="margin:0 0 8px;">{chart_label} {idx}</h3>'
-            f'<div data-chart-id="{html.escape(chart_id)}"></div>'
-            f"</section>"
-        )
-        for idx, chart_id in enumerate(missing_ids, start=1)
-    )
-    chart_section = (
-        '<section style="margin-top:22px;">'
-        f'<h2 style="margin:0 0 10px;">{charts_label}</h2>'
-        f"{section_items}"
-        "</section>"
+    chart_placeholders = "".join(
+        f'<div data-chart-id="{html.escape(chart_id)}" style="min-height:260px"></div>'
+        for chart_id in missing_ids
     )
     if "</body>" in html_text.lower():
-        return re.sub(r"</body>", chart_section + "</body>", html_text, count=1, flags=re.IGNORECASE)
-    return html_text + chart_section
+        return re.sub(r"</body>", chart_placeholders + "</body>", html_text, count=1, flags=re.IGNORECASE)
+    return html_text + chart_placeholders
 
 
 def _normalize_report_bundle(bundle: dict, fallback_bundle: dict, chart_specs: list[dict]) -> dict:
@@ -1660,11 +1766,12 @@ def _normalize_report_bundle(bundle: dict, fallback_bundle: dict, chart_specs: l
             }
         )
 
-    if not normalized_bindings:
+    if not normalized_bindings and html_document:
+        used_chart_ids = set(re.findall(r'data-chart-id=["\']([^"\']+)["\']', html_document, flags=re.IGNORECASE))
         normalized_bindings = [
             {"chart_id": f"chart_{idx}", "option": spec, "height": 360}
             for idx, spec in enumerate(chart_specs[:20], start=1)
-            if isinstance(spec, dict)
+            if isinstance(spec, dict) and f"chart_{idx}" in used_chart_ids
         ]
 
     return {
@@ -1678,25 +1785,76 @@ def _normalize_report_bundle(bundle: dict, fallback_bundle: dict, chart_specs: l
 
 def _build_fallback_report_bundle(markdown_text: str, chart_specs: list[dict]) -> dict:
     safe_markdown = str(markdown_text or "").strip()
-    is_en = get_lang() == "en"
-    chart_label = "Chart" if is_en else "图表"
     chart_bindings = [
         {"chart_id": f"chart_{idx}", "option": spec, "height": 360}
         for idx, spec in enumerate(chart_specs[:20], start=1)
         if isinstance(spec, dict)
     ]
-    chart_slots = "".join(
-        f'<section style="margin-top:20px;"><h2 style="margin:0 0 8px;">{chart_label} {idx}</h2><div data-chart-id="chart_{idx}"></div></section>'
-        for idx, _ in enumerate(chart_bindings, start=1)
-    )
-    html_document = _markdown_to_basic_html(safe_markdown, chart_slots)
+    chart_slots = "".join(f'<div data-chart-id="chart_{idx}" style="min-height:260px"></div>' for idx, _ in enumerate(chart_bindings, start=1))
+    title = "Analysis Report" if get_lang() == "en" else "\u5206\u6790\u62a5\u544a"
+    html_document = _build_polished_fallback_report_html(safe_markdown, title=title, extra_blocks=chart_slots)
     return {
-        "title": "Analysis Report" if get_lang() == "en" else "\u5206\u6790\u62a5\u544a",
+        "title": title,
         "summary": safe_markdown[:500],
         "html_document": html_document,
         "chart_bindings": chart_bindings,
         "legacy_markdown": safe_markdown,
     }
+
+
+def _build_polished_fallback_report_html(markdown_text: str, title: str, extra_blocks: str = "") -> str:
+    is_en = get_lang() == "en"
+    html_lang = "en" if is_en else "zh-CN"
+    safe_title = str(title or ("Analysis Report" if is_en else "\u5206\u6790\u62a5\u544a")).strip()
+    report_title, summary, rendered = _build_polished_report_sections(markdown_text, safe_title)
+    body_content = rendered or _render_markdown_like_html(str(markdown_text or "").strip()) or "<p></p>"
+    summary_html = f"<p>{html.escape(summary)}</p>" if summary else ""
+    eyebrow = "Autonomous Analysis" if is_en else "\u4e00\u952e\u81ea\u52a8\u5206\u6790"
+    return (
+        f"<!doctype html><html lang=\"{html_lang}\"><head><meta charset=\"UTF-8\"/>"
+        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\"/>"
+        f"<title>{html.escape(report_title)}</title>"
+        "<style>:root{color-scheme:light;--ink:#111827;--muted:#64748b;--line:#dbe4ef;--paper:#f6f8fb;--surface:#ffffff;--accent:#2563eb;--accent2:#14b8a6}"
+        "*{box-sizing:border-box}body{margin:0;font-family:Inter,Segoe UI,Arial,sans-serif;color:var(--ink);background:radial-gradient(circle at 18% 0%,rgba(37,99,235,.16),transparent 28%),linear-gradient(180deg,#f8fbff 0%,#edf2f7 100%);line-height:1.68}"
+        ".report-shell{max-width:1180px;margin:0 auto;padding:34px 22px 58px}.report-hero{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(240px,.65fr);gap:26px;align-items:stretch;margin-bottom:24px}"
+        ".hero-main{background:linear-gradient(135deg,#0f172a 0%,#1d4ed8 58%,#0f766e 100%);color:#fff;border-radius:24px;padding:34px 36px;box-shadow:0 24px 70px rgba(15,23,42,.22);position:relative;overflow:hidden}"
+        ".hero-main:after{content:\"\";position:absolute;right:-80px;bottom:-100px;width:260px;height:260px;border-radius:50%;background:rgba(255,255,255,.16)}.eyebrow{font-size:12px;text-transform:uppercase;letter-spacing:.12em;font-weight:800;color:#bfdbfe;margin-bottom:12px}"
+        "h1{font-size:38px;line-height:1.16;margin:0;letter-spacing:0}.hero-main p{max-width:780px;color:#dbeafe;font-size:15px;margin:18px 0 0}.hero-side{display:grid;gap:14px}.hero-note{background:rgba(255,255,255,.84);border:1px solid rgba(148,163,184,.28);border-radius:20px;padding:22px;box-shadow:0 18px 48px rgba(15,23,42,.10)}"
+        ".hero-note strong{display:block;font-size:13px;color:#2563eb;margin-bottom:8px}.hero-note span{display:block;color:var(--muted);font-size:14px}.content-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px;align-items:start}"
+        ".report-section{background:rgba(255,255,255,.92);border:1px solid rgba(148,163,184,.28);border-radius:18px;padding:24px 26px;box-shadow:0 18px 48px rgba(15,23,42,.08);min-width:0}.report-section:first-child{grid-column:1/-1}"
+        ".section-index{display:inline-flex;align-items:center;justify-content:center;height:26px;min-width:34px;padding:0 10px;border-radius:999px;background:#dbeafe;color:#1d4ed8;font-size:12px;font-weight:900;margin-bottom:12px}.report-section h2{font-size:24px;line-height:1.25;margin:0 0 14px}.section-body{font-size:15px;color:#243042;overflow-wrap:anywhere}.section-body p{margin:10px 0}.section-body ul,.section-body ol{padding-left:22px;margin:10px 0}.section-body li{margin:7px 0}"
+        ".section-body table{width:100%;table-layout:fixed;border-collapse:separate;border-spacing:0;margin:16px 0;border:1px solid var(--line);border-radius:14px;overflow:hidden;background:#fff}.section-body th,.section-body td{padding:12px 14px;border-bottom:1px solid #e7edf5;text-align:left;vertical-align:top;word-break:break-word}.section-body th{background:#f1f6fd;color:#0f172a;font-weight:850}.section-body tr:last-child td{border-bottom:0}"
+        ".chart-zone{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px;margin-top:18px}.chart-zone>[data-chart-id],.chart-zone>div{background:#fff;border:1px solid rgba(148,163,184,.28);border-radius:18px;box-shadow:0 18px 48px rgba(15,23,42,.08);padding:12px;min-height:320px}[data-chart-id]{width:100%;min-height:320px}"
+        "@media(max-width:860px){.report-shell{padding:18px 12px 36px}.report-hero,.content-grid,.chart-zone{grid-template-columns:1fr}.hero-main{padding:28px 24px;border-radius:20px}h1{font-size:30px}.report-section{padding:20px}}@media print{body{background:#fff}.report-shell{max-width:none;padding:0}.hero-main,.hero-note,.report-section,.chart-zone>[data-chart-id],.chart-zone>div{box-shadow:none;break-inside:avoid-page}}</style>"
+        "</head><body><main class=\"report-shell\">"
+        f"<section class=\"report-hero\"><div class=\"hero-main\"><div class=\"eyebrow\">{eyebrow}</div><h1>{html.escape(report_title)}</h1>{summary_html}</div>"
+        f"<aside class=\"hero-side\"><div class=\"hero-note\"><strong>{'Evidence-based' if is_en else '基于迭代证据'}</strong><span>{'Generated from completed analysis rounds and verified execution output.' if is_en else '根据已完成的分析轮次、执行结果和可用图表整理。'}</span></div>"
+        f"<div class=\"hero-note\"><strong>{'Chart-ready' if is_en else '图表可挂载'}</strong><span>{'Visual placeholders remain available for host-rendered ECharts.' if is_en else '保留图表挂载点，由页面宿主渲染 ECharts。'}</span></div></aside></section>"
+        f"<section class=\"content-grid\">{body_content}</section>"
+        f"{f'<section class=\"chart-zone\">{extra_blocks}</section>' if extra_blocks else ''}"
+        "</main></body></html>"
+    )
+
+
+def _build_minimal_report_html(markdown_text: str, title: str, extra_blocks: str = "") -> str:
+    is_en = get_lang() == "en"
+    html_lang = "en" if is_en else "zh-CN"
+    safe_title = str(title or ("Analysis Report" if is_en else "\u5206\u6790\u62a5\u544a")).strip()
+    body_html = _render_markdown_like_html(str(markdown_text or "").strip())
+    if not body_html:
+        body_html = "<p></p>"
+    return (
+        f"<!doctype html><html lang=\"{html_lang}\"><head><meta charset=\"UTF-8\"/>"
+        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\"/>"
+        f"<title>{html.escape(safe_title)}</title>"
+        "<style>*{box-sizing:border-box}body{margin:0;font-family:Arial,sans-serif;color:#111827;background:#fff;line-height:1.65}"
+        "main{max-width:960px;margin:0 auto;padding:32px 20px}h1{font-size:28px;line-height:1.25;margin:0 0 20px}"
+        "h2,h3{line-height:1.35;margin:24px 0 10px}p,ul,ol,table{margin:12px 0}table{width:100%;border-collapse:collapse}"
+        "th,td{border:1px solid #e5e7eb;padding:8px 10px;text-align:left;vertical-align:top}th{background:#f9fafb}"
+        "pre{white-space:pre-wrap;overflow-wrap:anywhere}code{background:#f3f4f6;padding:1px 4px;border-radius:4px}"
+        "[data-chart-id]{width:100%;min-height:260px;margin:18px 0}</style>"
+        f"</head><body><main><h1>{html.escape(safe_title)}</h1>{body_html}{extra_blocks}</main></body></html>"
+    )
 
 
 def _build_polished_report_sections(markdown_text: str, fallback_title: str) -> tuple[str, str, str]:
@@ -1929,6 +2087,8 @@ def _render_markdown_like_html(markdown_text: str) -> str:
 def _sanitize_report_html(document: str) -> str:
     text = str(document or "")
     text = re.sub(r"<script\b[^<]*(?:(?!</script>)<[^<]*)*</script>", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"<link\b[^>]*rel\s*=\s*(['\"]?)stylesheet\1[^>]*>", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"@import\s+url\([^)]+\)\s*;?", "", text, flags=re.IGNORECASE)
     text = re.sub(r"\son[a-z]+\s*=\s*(['\"]).*?\1", "", text, flags=re.IGNORECASE | re.DOTALL)
     text = re.sub(r'(href|src)\s*=\s*([\"\'])\s*javascript:[^\"\']*\2', r"\1=\2#\2", text, flags=re.IGNORECASE)
     return text
