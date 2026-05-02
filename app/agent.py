@@ -13,7 +13,7 @@ import httpx
 
 
 
-from app.config import AppConfig, load_config
+from app.config import AppConfig, format_prompt, get_prompt, load_config
 
 from app.i18n import t, get_lang
 
@@ -139,20 +139,6 @@ def generate_data_insight(
 
         return
 
-    parts.append("【AI 问数上下文摘要】" if not is_en else "[AI Data Question Context Summary]")
-    parts.append(
-        json.dumps(
-            {
-                "selected_tables": sandbox.get("tables", [])[:12],
-                "selected_files": selected_files[:12],
-                "business_knowledge_count": len(business_knowledge),
-                "recent_iteration_count": len(iteration_history),
-            },
-            ensure_ascii=False,
-        )
-    )
-    parts.append("")
-
     question_label = t("label_user_question", default="用户问题")
 
     sql_label = t("label_executed_sql", default="执行 SQL")
@@ -161,16 +147,16 @@ def generate_data_insight(
 
     instruction = t("instruction_no_code", default="请输出面向业务负责人的分析结论，不要输出任何代码。")
 
-    user_prompt = (
-
-        f"{question_label}: {message}\n"
-
-        f"{sql_label}: {sql}\n"
-
-        f"{data_label}: {data_summary}\n"
-
-        f"{instruction}"
-
+    user_prompt = format_prompt(
+        config.prompts,
+        "data_insight_user",
+        question_label=question_label,
+        message=message,
+        sql_label=sql_label,
+        sql=sql,
+        data_label=data_label,
+        data_summary=data_summary,
+        instruction=instruction,
     )
 
     agents: list[tuple[str, str]] = [
@@ -220,6 +206,7 @@ def _build_iteration_user_prompt(
     iteration_history: list[dict],
 
     business_knowledge: list[str],
+    config: AppConfig | None = None,
 
 ) -> str:
 
@@ -487,32 +474,8 @@ def _build_iteration_user_prompt(
 
             parts.append(val)
 
-    if is_en:
-        parts.append(
-            "- Language requirement: keep JSON keys in English, and keep all narrative values in English "
-            "(conclusions.text, hypotheses.text, action_items, explanation, final_report_outline)."
-        )
-        parts.append(
-            "- AI data-question protocol: include question_type, needs_clarification, and clarification. "
-            "When the business metric, time range, filter scope, or grain is ambiguous, return steps=[] and ask one concise clarification question."
-        )
-        parts.append(
-            "- Narrative fields must contain final concrete values. Never output unresolved placeholders, "
-            "Python variable names, or f-string fragments such as {top_dept}, {metric:.2f}, or {'key': value}."
-        )
-    else:
-        parts.append(
-            "- 输出语言要求：JSON 字段名保持英文，但所有文本内容必须使用简体中文"
-            "（包括 conclusions.text、hypotheses.text、action_items、explanation、final_report_outline）。"
-        )
-        parts.append(
-            "- AI 问数协议：必须包含 question_type、needs_clarification、clarification。"
-            "当指标定义、时间范围、筛选条件或业务粒度不明确且会影响答案时，返回 steps=[] 并提出一个简洁澄清问题。"
-        )
-        parts.append(
-            "- 所有叙述字段都必须写成最终可读的具体值，绝不能输出未解析的占位符、Python 变量名、"
-            "f-string 片段或原始字典文本，例如 {top_dept}、{metric:.2f}、{'key': value}。"
-        )
+    cfg = config or load_config()
+    parts.append(get_prompt(cfg.prompts, "iteration_user_constraints"))
 
     return "\n".join(parts)
 
@@ -697,7 +660,7 @@ def _run_iteration_by_llm(
 
     system_prompt = config.iteration_system_prompt
 
-    user_prompt = _build_iteration_user_prompt(message, sandbox, iteration_history, business_knowledge)
+    user_prompt = _build_iteration_user_prompt(message, sandbox, iteration_history, business_knowledge, config=config)
 
 
 
@@ -954,51 +917,36 @@ def synthesize_iteration_result(
                 text = str(conclusion).strip()
             if text and text not in known_findings:
                 known_findings.append(text)
-    system_prompt = (
-        "You are a senior AI data-question answering analyst. "
-        "You analyze executed SQL/Python evidence after the tool run is complete and produce a concise, traceable answer to the user's data question. "
-        "Never generate SQL, Python, steps, or tool plans in this stage. "
-        "Only produce conclusions that are directly supported by the provided execution evidence. "
-        "Prefer convergence over repetition: once a finding is already known, either explore a genuinely new metric/dimension/time grain or finalize. "
-        "If the evidence shows missing fields, empty data, or an ambiguous business definition, say that clearly instead of inventing values."
+    system_prompt = get_prompt(config.prompts, "reflection_system")
+    mode_instruction = (
+        "- This is an incremental exploration round. Output only newly discovered findings from this round's execution evidence. Do not restate prior findings unless the new evidence changes, invalidates, or sharpens them.\n"
+        "- If this round only confirms old findings and adds nothing new, keep conclusions/hypotheses/action_items minimal.\n"
+        "- If two or more recent rounds have already covered the same metric/entity/route/topic, set finalize=true unless this round adds a clearly new dimension.\n"
+        if incremental
+        else "- This is the final synthesis stage. You may combine findings across rounds into a complete final answer.\n"
     )
-    user_prompt = (
-        f"User request:\n{message}\n\n"
-        f"Business knowledge:\n{json.dumps(business_knowledge[:20], ensure_ascii=False)}\n\n"
-        f"Recent history:\n{json.dumps(history_preview, ensure_ascii=False)}\n\n"
-        f"Known findings from previous rounds (do not restate unless directly updated by new evidence):\n{json.dumps(known_findings[:12], ensure_ascii=False)}\n\n"
-        f"Planner metadata:\n{json.dumps({'goal': planned_result.get('goal', ''), 'observation_focus': planned_result.get('observation_focus', ''), 'continue_reason': planned_result.get('continue_reason', ''), 'stop_if': planned_result.get('stop_if', ''), 'finalize': planned_result.get('finalize', False)}, ensure_ascii=False)}\n\n"
-        f"Executed steps:\n{json.dumps(planned_result.get('steps', []), ensure_ascii=False)}\n\n"
-        f"Execution evidence:\n{_summarize_execution_for_reflection(execution_result)}\n\n"
-        f"Available sandbox tables:\n{json.dumps(sandbox.get('tables', [])[:20], ensure_ascii=False)}\n\n"
-        f"Write all narrative values in {report_language}.\n"
-        "Return JSON only with this schema:\n"
-        "- steps: []\n"
-        "- tools_used: []\n"
-        "- direct_answer: a concise answer grounded in the execution result\n"
-        "- conclusions: array of {\"text\": \"...\", \"confidence\": 0-1}\n"
-        "- hypotheses: array of {\"id\": \"...\", \"text\": \"...\"}\n"
-        "- action_items: array of readable strings\n"
-        "- explanation: short evidence-based explanation\n"
-        "- final_report_outline: array of short strings\n"
-        "- goal, observation_focus, continue_reason, stop_if: short strings\n"
-        "- question_type: one of metric_lookup, dimension_compare, trend_analysis, root_cause, anomaly_check, data_overview, clarification, or other\n"
-        "- needs_clarification: boolean\n"
-        "- clarification: one concise clarification question when needed, otherwise empty string\n"
-        "- finalize: boolean\n"
-        "Rules:\n"
-        "- Do not output SQL, Python, or any code.\n"
-        "- Do not invent facts not present in the evidence.\n"
-        "- Never output placeholders or unresolved variables like {x}.\n"
-        "- The direct_answer must answer the user's question first, then mention the key supporting evidence or limitation.\n"
-        "- If the result is empty or a required column/table is missing, set needs_clarification=true only when a business definition is missing; otherwise explain the data limitation and set finalize=true.\n"
-        + (
-            "- This is an incremental exploration round. Output only newly discovered findings from this round's execution evidence. Do not restate prior findings unless the new evidence changes, invalidates, or sharpens them.\n"
-            "- If this round only confirms old findings and adds nothing new, keep conclusions/hypotheses/action_items minimal.\n"
-            "- If two or more recent rounds have already covered the same metric/entity/route/topic, set finalize=true unless this round adds a clearly new dimension.\n"
-            if incremental
-            else "- This is the final synthesis stage. You may combine findings across rounds into a complete final answer.\n"
-        )
+    user_prompt = format_prompt(
+        config.prompts,
+        "reflection_user",
+        message=message,
+        business_knowledge=json.dumps(business_knowledge[:20], ensure_ascii=False),
+        history_preview=json.dumps(history_preview, ensure_ascii=False),
+        known_findings=json.dumps(known_findings[:12], ensure_ascii=False),
+        planner_metadata=json.dumps(
+            {
+                "goal": planned_result.get("goal", ""),
+                "observation_focus": planned_result.get("observation_focus", ""),
+                "continue_reason": planned_result.get("continue_reason", ""),
+                "stop_if": planned_result.get("stop_if", ""),
+                "finalize": planned_result.get("finalize", False),
+            },
+            ensure_ascii=False,
+        ),
+        executed_steps=json.dumps(planned_result.get("steps", []), ensure_ascii=False),
+        execution_evidence=_summarize_execution_for_reflection(execution_result),
+        available_tables=json.dumps(sandbox.get("tables", [])[:20], ensure_ascii=False),
+        report_language=report_language,
+        mode_instruction=mode_instruction,
     )
     chunks = (
         _call_openai_protocol(system_prompt=system_prompt, user_prompt=user_prompt, model=model, config=config)
@@ -1039,20 +987,15 @@ def generate_auto_analysis_report(
 
     knowledge_block = "\n".join(f"- {item}" for item in business_knowledge[:30]) or "- N/A"
     rounds_summary = _build_loop_rounds_summary(loop_rounds)
-    system_prompt = (
-        "You are a senior analytics lead. Turn multi-round SQL/Python analysis traces into a concise business report. "
-        "Let the evidence and iteration path determine the report structure. "
-        "Do not invent evidence. If confidence is limited, say so explicitly."
-    )
-    user_prompt = (
-        f"Original request:\n{message}\n\n"
-        f"Stop reason:\n{stop_reason}\n\n"
-        f"Business knowledge:\n{knowledge_block}\n\n"
-        f"Auto-analysis rounds:\n{rounds_summary}\n\n"
-        f"Write all content in {report_language}.\n\n"
-        "Write the final report in Markdown, but choose the sections, heading names, emphasis, and level of detail yourself "
-        "based on what the completed iterations actually discovered. Use only sections that help explain the result clearly. "
-        "Avoid code unless a very short snippet is necessary."
+    system_prompt = get_prompt(config.prompts, "auto_report_system")
+    user_prompt = format_prompt(
+        config.prompts,
+        "auto_report_user",
+        message=message,
+        stop_reason=stop_reason,
+        knowledge_block=knowledge_block,
+        rounds_summary=rounds_summary,
+        report_language=report_language,
     )
     chunks = (
         _call_openai_protocol(system_prompt=system_prompt, user_prompt=user_prompt, model=model, config=config)
@@ -1211,49 +1154,26 @@ def generate_auto_analysis_report_bundle(
     if not stage1_bundle["action_items"]:
         stage1_bundle["action_items"] = _extract_action_items({"action_items": _merge_loop_items("action_items")})
 
-    stage2_system_prompt = (
-        "You are a principal analytics web designer. Produce only JSON for a self-contained analytics report. "
-        "Design the standalone HTML report from the completed iteration results themselves. "
-        "Choose the structure, narrative flow, and visual treatment that best fit the evidence; never follow a fixed report template."
-    )
-    stage2_user_prompt = (
-        "Return valid JSON only. No markdown fences.\n"
-        "Schema:\n"
-        "{"
-        "\"title\": string, "
-        "\"summary\": string, "
-        "\"chart_bindings\": [{\"chart_id\": string, \"option\": object, \"height\": number}], "
-        "\"html_document\": string"
-        "}\n\n"
-        f"Draft report title for context, not a required final title:\n{stage1_bundle['title']}\n\n"
-        f"Draft report summary for context, not a required final summary:\n{stage1_bundle['summary']}\n\n"
-        f"Conclusions:\n{json.dumps(stage1_bundle['conclusions'], ensure_ascii=False)}\n\n"
-        f"Action items:\n{json.dumps(stage1_bundle['action_items'], ensure_ascii=False)}\n\n"
-        f"Original request:\n{message}\n\n"
-        f"Stop reason: {stop_reason}\n"
-        f"Rounds completed: {rounds_completed}\n\n"
-        f"Business knowledge:\n{knowledge_block}\n\n"
-        f"Session patches:\n{patches_block}\n\n"
-        f"Session history summary:\n{history_block}\n\n"
-        f"Loop rounds:\n{summary_rounds}\n\n"
-        f"Structured iteration results:\n{iteration_materials_block}\n\n"
-        f"Final result rows preview:\n{rows_preview}\n\n"
-        f"Output language requirement: {report_language}. Keep title/summary/body in this language.\n\n"
-        "Chart mounting rule:\n"
-        f"- Available chart ids: {chart_hint}.\n"
-        f"- Available chart specs JSON:\n{chart_specs_block}\n"
-        "- When a chart supports the story you choose, place a chart node in html_document with data-chart-id=\"...\".\n"
-        "- chart_bindings should map every used chart_id to an ECharts option and height.\n"
-        "- You may omit irrelevant charts, but do not invent chart ids.\n\n"
-        "HTML quality requirements:\n"
-        "- Return a complete standalone HTML document with <!doctype html>, <html>, <head>, <style>, and <body>.\n"
-        "- Make it a polished visual analytics web report, not a plain white paper or Markdown-to-HTML document.\n"
-        "- Decide the layout, sections, typography, emphasis, and visual rhythm yourself; use substantial CSS for spacing, hierarchy, surfaces, tables, and chart areas.\n"
-        "- Include a designed first viewport with strong report identity and at least one visual summary treatment such as KPI bands, insight panels, split layouts, or editorial callouts when supported by the evidence.\n"
-        "- Do not include external scripts, external stylesheets, or inline JavaScript; charts are mounted by the host application.\n"
-        "- Do NOT include raw Markdown syntax anywhere in visible text: no ## headings, no **bold**, no pipe tables like | a | b |, and no ``` fences.\n"
-        "- Convert any tabular content into real <table><thead><tbody> HTML.\n"
-        "- Keep content faithful to the iteration evidence; do not add unsupported claims."
+    stage2_system_prompt = get_prompt(config.prompts, "report_bundle_system")
+    stage2_user_prompt = format_prompt(
+        config.prompts,
+        "report_bundle_user",
+        draft_title=stage1_bundle["title"],
+        draft_summary=stage1_bundle["summary"],
+        conclusions=json.dumps(stage1_bundle["conclusions"], ensure_ascii=False),
+        action_items=json.dumps(stage1_bundle["action_items"], ensure_ascii=False),
+        message=message,
+        stop_reason=stop_reason,
+        rounds_completed=rounds_completed,
+        knowledge_block=knowledge_block,
+        patches_block=patches_block,
+        history_block=history_block,
+        summary_rounds=summary_rounds,
+        iteration_materials_block=iteration_materials_block,
+        rows_preview=rows_preview,
+        report_language=report_language,
+        chart_hint=chart_hint,
+        chart_specs_block=chart_specs_block,
     )
     stage2_chunks = (
         _call_openai_protocol(system_prompt=stage2_system_prompt, user_prompt=stage2_user_prompt, model=model, config=config)
@@ -1641,18 +1561,13 @@ def _repair_report_bundle_json(
     config: AppConfig,
     report_language: str,
 ) -> str:
-    system_prompt = (
-        "You are a strict JSON formatter. Convert the input into valid JSON only. "
-        "No prose, no code fences."
-    )
-    user_prompt = (
-        "Output exactly one JSON object with keys: title, summary, html_document, chart_bindings.\n"
-        "If the input is markdown, convert it to an HTML document for html_document.\n"
-        "html_document must include chart placeholders using data-chart-id when chart ids are present.\n"
-        "chart_bindings can be an empty array when unavailable.\n\n"
-        f"Language requirement: {report_language}.\n\n"
-        f"Raw response to repair:\n{raw_response}\n\n"
-        f"Fallback markdown content:\n{fallback_markdown}\n"
+    system_prompt = get_prompt(config.prompts, "report_bundle_repair_system")
+    user_prompt = format_prompt(
+        config.prompts,
+        "report_bundle_repair_user",
+        report_language=report_language,
+        raw_response=raw_response,
+        fallback_markdown=fallback_markdown,
     )
     chunks = (
         _call_openai_protocol(system_prompt=system_prompt, user_prompt=user_prompt, model=model, config=config)
@@ -1682,29 +1597,15 @@ def _generate_html_document_by_llm(
         ensure_ascii=False,
     )[:20000]
     context_block = json.dumps(report_context or {}, ensure_ascii=False, default=str)[:30000]
-    system_prompt = (
-        "You are a data-report web designer. Return a standalone HTML document only. "
-        "Redesign the report from the analysis evidence. Choose the HTML structure and visual style yourself. "
-        "Do not include JavaScript."
-    )
-    user_prompt = (
-        "Create a complete standalone HTML document from the completed analysis evidence.\n"
-        "Requirements:\n"
-        "- Return only HTML text.\n"
-        "- Use substantial, polished CSS that fit the analysis outcome; this must look like a designed analytics web report, not a plain white document.\n"
-        "- Decide the layout, sectioning, emphasis, and table treatment yourself; do not use a fixed report template.\n"
-        "- Include strong first-screen identity, designed surfaces, clear spacing, responsive layout, styled tables, and chart areas when charts support the story.\n"
-        "- Do not include external scripts, external stylesheets, or inline JavaScript.\n"
-        "- Do NOT include raw Markdown syntax in visible text: no ##, no **bold**, no |---| pipe tables, and no ``` fences.\n"
-        "- Convert any markdown table into a real <table><thead><tbody> structure.\n"
-        "- Keep content faithful to the evidence; do not add unsupported claims.\n"
-        f"- Use {report_language} for the whole document text.\n"
-        "- Include chart placeholders using available chart ids when they support the report story: <div data-chart-id=\"...\"></div>.\n"
-        "- Do not invent chart ids.\n"
-        f"Available chart ids: {chart_hint}\n"
-        f"Available chart specs JSON:\n{chart_specs_block}\n\n"
-        f"Structured report context:\n{context_block}\n\n"
-        f"Fallback source markdown, for evidence only:\n{fallback_markdown}\n"
+    system_prompt = get_prompt(config.prompts, "html_report_system")
+    user_prompt = format_prompt(
+        config.prompts,
+        "html_report_user",
+        report_language=report_language,
+        chart_hint=chart_hint,
+        chart_specs_block=chart_specs_block,
+        context_block=context_block,
+        fallback_markdown=fallback_markdown,
     )
     chunks = (
         _call_openai_protocol(system_prompt=system_prompt, user_prompt=user_prompt, model=model, config=config)
@@ -2757,69 +2658,8 @@ def generate_skill_proposal(
 
     """Uses LLM to summarize a successful analysis into a skill proposal."""
 
-    from app.i18n import t, get_lang
-
-    is_en = get_lang() == "en"
-
-    system_prompt = "You are a business knowledge extraction expert. Please extract a reusable 'analysis skill' from the user's question, analysis process, and conclusions." if is_en else "你是一个业务知识提炼专家。请根据用户的提问、分析过程和结论，提取一个可复用的“分析经验”。"
-
-    user_prompt_template = """
-
-User Question: {message}
-
-Sandbox: {sandbox_name}
-
-Conclusions: {conclusions}
-
-Steps: {steps}
-
-Explanation: {explanation}
-
-
-
-Please return a JSON object with:
-
-1. "name": Skill name (related to context and concise)
-
-2. "description": Detailed description of the skill
-
-3. "tags": List of keyword tags (3-5)
-
-4. "knowledge": Core business knowledge (rules, formulas, field meanings, etc. - be very detailed so it can be reused).
-
-
-
-Return ONLY JSON.
-
-""" if is_en else """
-
-用户问题: {message}
-
-沙盒名称: {sandbox_name}
-
-分析结论: {conclusions}
-
-分析步骤: {steps}
-
-核心解释: {explanation}
-
-
-
-请返回一个 JSON 对象，包含以下字段：
-
-1. "name": 经验名称（与整个对话内容高度相关，并且简洁）
-
-2. "description": 经验描述（要非常详细的描述）
-
-3. "tags": 关键词标签列表（3-5个）
-
-4. "knowledge": 提炼的核心业务知识（要非常详细的业务知识，包含交互流程、业务规则、指标口径、字段说明等所有知识，要让一个普通人拿到这个经验描述能直接用起来例如：某某指标计算公式、业务判定逻辑、关键字段的业务含义。每条知识点要独立且精确，可以被后续对话直接参考）
-
-
-
-仅返回 JSON，不要任何解释文字。
-
-"""
+    config = load_config()
+    system_prompt = get_prompt(config.prompts, "skill_proposal_system")
 
     steps = analysis_result.get('steps', [])
     if not steps and analysis_result.get("loop_rounds"):
@@ -2830,7 +2670,9 @@ Return ONLY JSON.
                     steps.append(step)
     report_text = str(analysis_result.get("final_report_md", "")).strip()
 
-    user_prompt = user_prompt_template.format(
+    user_prompt = format_prompt(
+        config.prompts,
+        "skill_proposal_user",
 
         message=message,
 
@@ -2843,10 +2685,6 @@ Return ONLY JSON.
         explanation=(analysis_result.get('explanation', '') or "") + (f"\n\nFinal Report:\n{report_text}" if report_text else "")
 
     )
-
-
-
-    config = load_config()
 
     selected_provider = (provider or config.llm_provider).lower()
 
