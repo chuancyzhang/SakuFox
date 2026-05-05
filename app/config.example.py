@@ -381,11 +381,13 @@ PROMPTS = {
         "en": (
             "You are a principal analytics web designer. Produce only JSON for a self-contained analytics report. "
             "Design the standalone HTML report from the completed iteration results themselves. "
-            "Choose the structure, narrative flow, and visual treatment that best fit the evidence; never follow a fixed report template."
+            "Choose the structure, narrative flow, and visual treatment that best fit the evidence; never follow a fixed report template. "
+            "The html_document value must be real browser-renderable HTML, not markdown, escaped visible text, JSON-as-text, or a template conversion."
         ),
         "zh": (
             "你是首席分析报告网页设计师。请只输出用于自包含分析报告的 JSON。"
             "根据已完成的迭代结果本身设计独立 HTML 报告。请选择最适合证据的结构、叙事流和视觉表达，never follow a fixed report template。"
+            "html_document 的值必须是真正可被浏览器渲染的 HTML，不是 markdown、可见转义文本、JSON 文本或模板转换结果。"
         ),
     },
     "report_bundle_user": {
@@ -413,10 +415,12 @@ PROMPTS = {
             "- When a chart supports the story you choose, place a chart node in html_document with data-chart-id=\"...\".\n"
             "- chart_bindings should map every used chart_id to an ECharts option and height.\n"
             "- You may omit irrelevant charts, but do not invent chart ids.\n\n"
-            "HTML quality requirements:\n"
-            "- Return a complete standalone HTML document with <!doctype html>, <html>, <head>, <style>, and <body>.\n"
-            "- Make it a polished visual analytics web report, not a plain white paper or Markdown-to-HTML document.\n"
-            "- Decide the layout, sections, typography, emphasis, and visual rhythm yourself; use substantial CSS for spacing, hierarchy, surfaces, tables, and chart areas.\n"
+              "HTML quality requirements:\n"
+              "- Return a complete standalone HTML document with <!doctype html>, <html>, <head>, <style>, and <body>.\n"
+              "- The <head> must include <meta charset=\"UTF-8\"> or an equivalent UTF-8 charset declaration.\n"
+              "- Make it a polished visual analytics web report, not a plain white paper or Markdown-to-HTML document.\n"
+              "- html_document must contain actual HTML tags, not escaped visible tags such as &lt;html&gt;, JSON text, or visible escape sequences such as \\u4e2d or \\n.\n"
+              "- Decide the layout, sections, typography, emphasis, and visual rhythm yourself; use substantial CSS for spacing, hierarchy, surfaces, tables, and chart areas.\n"
             "- Include a designed first viewport with strong report identity and at least one visual summary treatment such as KPI bands, insight panels, split layouts, or editorial callouts when supported by the evidence.\n"
             "- Do not include external scripts, external stylesheets, or inline JavaScript; charts are mounted by the host application.\n"
             "- Do NOT include raw Markdown syntax anywhere in visible text: no ## headings, no **bold**, no pipe tables like | a | b |, and no ``` fences.\n"
@@ -447,10 +451,12 @@ PROMPTS = {
             "- 当图表能支撑你选择的叙事时，在 html_document 中放置 data-chart-id=\"...\" 的图表节点。\n"
             "- chart_bindings 应把每个使用的 chart_id 映射到 ECharts option 和 height。\n"
             "- 可以省略无关图表，但不要编造 chart id。\n\n"
-            "HTML 质量要求:\n"
-            "- 返回完整独立 HTML 文档，包含 <!doctype html>、<html>、<head>、<style> 和 <body>。\n"
-            "- 它必须是精致的可视化分析网页报告，not a plain white paper or Markdown-to-HTML document。\n"
-            "- 自行决定布局、章节、字体层级、重点和视觉节奏；使用充分 CSS 处理间距、层级、表面、表格和图表区域。\n"
+              "HTML 质量要求:\n"
+              "- 返回完整独立 HTML 文档，包含 <!doctype html>、<html>、<head>、<style> 和 <body>。\n"
+              "- <head> 必须包含 <meta charset=\"UTF-8\"> 或等价的 UTF-8 charset 声明。\n"
+              "- 它必须是精致的可视化分析网页报告，not a plain white paper or Markdown-to-HTML document。\n"
+              "- html_document 必须包含真实 HTML 标签，不能是 &lt;html&gt; 这类可见转义标签、JSON 文本，或 \\u4e2d、\\n 这类可见转义序列。\n"
+              "- 自行决定布局、章节、字体层级、重点和视觉节奏；使用充分 CSS 处理间距、层级、表面、表格和图表区域。\n"
             "- 当证据支持时，首屏应有强报告识别，并包含 KPI 区、洞察面板、分栏布局或编辑式重点提示等至少一种视觉摘要处理。\n"
             "- 不要包含外部脚本、外部样式表或内联 JavaScript；图表由宿主应用挂载。\n"
             "- 可见文本中不要包含原始 Markdown 语法：不要有 ## 标题、**加粗**、| a | b | 这类管道表格或 ``` 围栏。\n"
@@ -486,11 +492,12 @@ PROMPTS = {
         "en": (
             "You are a data-report web designer. Return a standalone HTML document only. "
             "Redesign the report from the analysis evidence. Choose the HTML structure and visual style yourself. "
-            "Do not include JavaScript."
+            "Do not include JavaScript. Return real browser-renderable HTML, not markdown, escaped visible text, JSON-as-text, or a template conversion."
         ),
         "zh": (
             "你是数据报告网页设计师。只返回独立 HTML 文档。"
             "请根据分析证据重新设计报告，自行选择 HTML 结构和视觉风格。不要包含 JavaScript。"
+            "返回真正可被浏览器渲染的 HTML，不要返回 markdown、可见转义文本、JSON 文本或模板转换结果。"
         ),
     },
     "html_report_user": {
@@ -498,7 +505,9 @@ PROMPTS = {
             "Create a complete standalone HTML document from the completed analysis evidence.\n"
             "Requirements:\n"
             "- Return only HTML text.\n"
+            "- Include <meta charset=\"UTF-8\"> or an equivalent UTF-8 charset declaration in <head>.\n"
             "- Use substantial, polished CSS that fit the analysis outcome; this must look like a designed analytics web report, not a plain white document.\n"
+            "- Output actual HTML tags, not escaped visible tags such as &lt;html&gt;, JSON text, or visible escape sequences such as \\u4e2d or \\n.\n"
             "- Decide the layout, sectioning, emphasis, and table treatment yourself; do not use a fixed report template.\n"
             "- Include strong first-screen identity, designed surfaces, clear spacing, responsive layout, styled tables, and chart areas when charts support the story.\n"
             "- Do not include external scripts, external stylesheets, or inline JavaScript.\n"
@@ -517,7 +526,9 @@ PROMPTS = {
             "请根据已完成的分析证据创建完整独立 HTML 文档。\n"
             "要求:\n"
             "- 只返回 HTML 文本。\n"
+            "- <head> 中包含 <meta charset=\"UTF-8\"> 或等价的 UTF-8 charset 声明。\n"
             "- 使用充足、精致、贴合分析结果的 CSS；它必须像设计过的分析网页报告，not a plain white document。\n"
+            "- 输出真实 HTML 标签，不要输出 &lt;html&gt; 这类可见转义标签、JSON 文本，或 \\u4e2d、\\n 这类可见转义序列。\n"
             "- 自行决定布局、章节、重点和表格处理，不要使用固定报告模板。\n"
             "- 包含强首屏识别、设计化表面、清晰间距、响应式布局、样式化表格，以及在图表支撑叙事时使用图表区域。\n"
             "- 不要包含外部脚本、外部样式表或内联 JavaScript。\n"

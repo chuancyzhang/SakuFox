@@ -1271,8 +1271,7 @@ def _extract_html_document_from_report_text(raw_text: str) -> str:
     text = str(raw_text or "").strip()
     if not text:
         return ""
-    normalized = re.sub(r"^```(?:json|html)?\s*", "", text, flags=re.IGNORECASE)
-    normalized = re.sub(r"\s*```$", "", normalized, flags=re.IGNORECASE).strip()
+    normalized = _decode_report_html_text(text)
 
     def parse_candidate(candidate: str) -> str:
         try:
@@ -1284,6 +1283,7 @@ def _extract_html_document_from_report_text(raw_text: str) -> str:
         html_doc = str(parsed.get("html_document", "") or "").strip()
         if not html_doc:
             return ""
+        html_doc = _decode_report_html_text(html_doc)
         match = re.search(r"<!doctype html[\s\S]*?</html>|<html[\s\S]*?</html>", html_doc, flags=re.IGNORECASE)
         return (match.group(0) if match else html_doc).strip()
 
@@ -1309,7 +1309,7 @@ def _extract_html_document_from_report_text(raw_text: str) -> str:
             decoded = json.loads(f'"{raw_value}"')
         except json.JSONDecodeError:
             decoded = raw_value
-        decoded_text = str(decoded).strip()
+        decoded_text = _decode_report_html_text(str(decoded).strip())
         match = re.search(r"<!doctype html[\s\S]*?</html>|<html[\s\S]*?</html>", decoded_text, flags=re.IGNORECASE)
         if match:
             return match.group(0).strip()
@@ -1320,21 +1320,72 @@ def _extract_html_document_from_report_text(raw_text: str) -> str:
     return ""
 
 
+def _decode_report_html_text(raw_text: str) -> str:
+    text = str(raw_text or "").strip()
+    if not text:
+        return ""
+    text = re.sub(r"^```(?:json|html)?\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s*```$", "", text, flags=re.IGNORECASE).strip()
+    if len(text) >= 2 and text[0] == text[-1] == '"':
+        try:
+            decoded = json.loads(text)
+            if isinstance(decoded, str):
+                text = decoded.strip()
+        except json.JSONDecodeError:
+            pass
+    if (
+        re.search(r"\\u(?:003c|003C|[0-9a-fA-F]{4})|\\n|\\t|\\/", text)
+        and not re.search(r"<!doctype html|<html", text, flags=re.IGNORECASE)
+    ):
+        try:
+            decoded = json.loads(f'"{text}"')
+            if isinstance(decoded, str):
+                text = decoded.strip()
+        except json.JSONDecodeError:
+            pass
+    if re.search(r"&lt;\s*(?:!doctype|/?html|/?body|/?div|/?table)", text, flags=re.IGNORECASE):
+        text = html.unescape(text).strip()
+    return text
+
+
+def _report_html_has_render_artifacts(html_document: str) -> bool:
+    raw = str(html_document or "")
+    if not raw.strip():
+        return True
+    visible = re.sub(r"<script[\s\S]*?</script>|<style[\s\S]*?</style>", " ", raw, flags=re.IGNORECASE)
+    visible = html.unescape(re.sub(r"<[^>]+>", "\n", visible))
+    artifact_patterns = (
+        r"\\u[0-9a-fA-F]{4}",
+        r"\\n|\\t|\\r",
+        r"&lt;\s*/?\s*(?:html|body|div|table|section|style)",
+        r'"html_document"\s*:',
+        r'"chart_bindings"\s*:',
+        r"\{\s*\"title\"\s*:",
+        r"�",
+        r"(?:Ã|Â|å|æ|ç|è|é|ä){2,}",
+    )
+    if any(re.search(pattern, visible, flags=re.IGNORECASE) for pattern in artifact_patterns):
+        return True
+    if "&lt;html" in raw.lower() or "&lt;!doctype" in raw.lower():
+        return True
+    return False
+
+
 def _normalize_auto_report_bundle(report_bundle: dict, chart_specs: list[dict]) -> dict:
     normalized = dict(report_bundle or {})
     raw_html = str(normalized.get("html_document", "") or "").strip()
     html_document = _extract_html_document_from_report_text(raw_html)
 
     fallback_markdown = str(normalized.get("legacy_markdown", "") or "").strip()
-    if not fallback_markdown and raw_html and "<html" not in raw_html.lower():
+    if not fallback_markdown and raw_html and "<html" not in raw_html.lower() and not raw_html.lstrip().startswith(("{", "[")):
         fallback_markdown = raw_html
     if not fallback_markdown:
         fallback_markdown = str(normalized.get("summary", "") or "").strip()
     fallback_bundle = _build_report_bundle_from_markdown(fallback_markdown, chart_specs)
 
-    if not html_document:
+    if not html_document or _report_html_has_render_artifacts(html_document):
         html_document = str(fallback_bundle.get("html_document", "") or "")
-    if "<html" not in html_document.lower():
+    if "<html" not in html_document.lower() or _report_html_has_render_artifacts(html_document):
         html_document = str(fallback_bundle.get("html_document", "") or "")
 
     normalized["html_document"] = html_document

@@ -1234,6 +1234,13 @@ def generate_auto_analysis_report_bundle(
             return combined_fallback
 
     raw_ai_html = str(stage2_parsed.get("html_document", "") or "").strip()
+    raw_ai_extracted_html = _extract_html_document(raw_ai_html)
+    raw_ai_html_is_candidate = (
+        bool(raw_ai_extracted_html)
+        and _is_standalone_html_document(raw_ai_extracted_html)
+        and not _looks_like_markdown_text(raw_ai_html)
+        and not _report_html_has_render_artifacts(raw_ai_extracted_html)
+    )
     stage2_bundle = _normalize_report_bundle(stage2_parsed, combined_fallback, chart_specs)
     stage2_bundle["title"] = str(stage2_bundle.get("title", "") or stage1_bundle["title"] or default_title)
     stage2_bundle["summary"] = str(stage2_bundle.get("summary", "") or stage1_bundle["summary"])
@@ -1245,7 +1252,7 @@ def generate_auto_analysis_report_bundle(
         stage2_bundle.get("html_document", ""),
         stage2_bundle.get("chart_bindings", []),
     )
-    is_qualified = bool(raw_ai_html) and _is_polished_html_document(stage2_bundle.get("html_document", ""))
+    is_qualified = raw_ai_html_is_candidate and _is_polished_html_document(stage2_bundle.get("html_document", ""))
     if not is_qualified:
         for _ in range(2):
             repaired_html = _generate_html_document_by_llm(
@@ -1344,6 +1351,8 @@ def _is_polished_html_document(text: str) -> bool:
     html_text = str(text or "").strip()
     if not _is_standalone_html_document(html_text):
         return False
+    if _report_html_has_render_artifacts(html_text):
+        return False
     style_blocks = re.findall(r"<style[^>]*>([\s\S]*?)</style>", html_text, flags=re.IGNORECASE)
     style_text = "\n".join(style_blocks)
     if len(style_text.strip()) < 500:
@@ -1393,6 +1402,68 @@ def _html_contains_markdown_artifacts(text: str) -> bool:
     return any(re.search(pattern, visible, flags=re.MULTILINE) for pattern in patterns)
 
 
+def _decode_report_html_escapes(text: str) -> str:
+    current = str(text or "").strip()
+    if not current:
+        return ""
+    current = re.sub(r"^```(?:json|html)?\s*", "", current, flags=re.IGNORECASE)
+    current = re.sub(r"\s*```$", "", current, flags=re.IGNORECASE).strip()
+    if len(current) >= 2 and current[0] == current[-1] == '"':
+        try:
+            decoded = json.loads(current)
+            if isinstance(decoded, str):
+                current = decoded.strip()
+        except json.JSONDecodeError:
+            pass
+    if (
+        re.search(r"\\u(?:003c|003C|[0-9a-fA-F]{4})|\\n|\\t|\\/", current)
+        and not re.search(r"<!doctype html|<html", current, flags=re.IGNORECASE)
+    ):
+        try:
+            decoded = json.loads(f'"{current}"')
+            if isinstance(decoded, str):
+                current = decoded.strip()
+        except json.JSONDecodeError:
+            pass
+    if re.search(r"&lt;\s*(?:!doctype|/?html|/?body|/?div|/?table)", current, flags=re.IGNORECASE):
+        current = html.unescape(current).strip()
+    return current
+
+
+def _visible_report_text(html_text: str) -> str:
+    visible = re.sub(r"<script[\s\S]*?</script>|<style[\s\S]*?</style>", " ", str(html_text or ""), flags=re.IGNORECASE)
+    visible = re.sub(r"<[^>]+>", "\n", visible)
+    return html.unescape(visible)
+
+
+def _report_html_has_render_artifacts(html_text: str) -> bool:
+    raw = str(html_text or "")
+    if not raw.strip():
+        return True
+    visible = _visible_report_text(raw)
+    visible_lower = visible.lower()
+    raw_lower = raw.lower()
+    artifact_patterns = (
+        r"\\u[0-9a-fA-F]{4}",
+        r"\\n|\\t|\\r",
+        r"&lt;\s*/?\s*(?:html|body|div|table|section|style)",
+        r'"html_document"\s*:',
+        r'"chart_bindings"\s*:',
+        r"\{\s*\"title\"\s*:",
+        r"�",
+        r"(?:Ã|Â|å|æ|ç|è|é|ä){2,}",
+    )
+    if any(re.search(pattern, visible, flags=re.IGNORECASE) for pattern in artifact_patterns):
+        return True
+    if "&lt;html" in raw_lower or "&lt;!doctype" in raw_lower:
+        return True
+    if _html_contains_markdown_artifacts(raw):
+        return True
+    if "<pre" in raw_lower and ("{\"" in visible_lower or "\\u" in visible_lower):
+        return True
+    return False
+
+
 def _parse_report_bundle_json(raw: str) -> dict | None:
     text = str(raw or "").strip()
     if not text:
@@ -1421,9 +1492,10 @@ def _extract_html_document(raw: str) -> str:
     text = str(raw or "").strip()
     if not text:
         return ""
+    text = _decode_report_html_escapes(text)
     json_like = _extract_html_from_json_like_text(text)
     if json_like:
-        return json_like
+        return _decode_report_html_escapes(json_like)
     if "<html" in text.lower():
         match = re.search(r"<!doctype html.*</html>|<html.*</html>", text, re.IGNORECASE | re.DOTALL)
         return (match.group(0) if match else text).strip()
@@ -1437,8 +1509,7 @@ def _extract_html_from_json_like_text(raw: str) -> str:
     text = str(raw or "").strip()
     if not text:
         return ""
-    normalized = re.sub(r"^```(?:json|html)?\s*", "", text, flags=re.IGNORECASE)
-    normalized = re.sub(r"\s*```$", "", normalized, flags=re.IGNORECASE).strip()
+    normalized = _decode_report_html_escapes(text)
 
     def parse_obj(candidate: str) -> str:
         try:
@@ -1448,7 +1519,7 @@ def _extract_html_from_json_like_text(raw: str) -> str:
         if isinstance(parsed, dict):
             html_doc = parsed.get("html_document")
             if isinstance(html_doc, str) and html_doc.strip():
-                return html_doc.strip()
+                return _decode_report_html_escapes(html_doc)
         return ""
 
     parsed_html = parse_obj(normalized)
@@ -1470,9 +1541,9 @@ def _extract_html_from_json_like_text(raw: str) -> str:
     if field_match:
         raw_val = field_match.group(1)
         try:
-            return json.loads(f'"{raw_val}"').strip()
+            return _decode_report_html_escapes(json.loads(f'"{raw_val}"'))
         except json.JSONDecodeError:
-            return raw_val.strip()
+            return _decode_report_html_escapes(raw_val)
     return ""
 
 
@@ -1614,12 +1685,12 @@ def _generate_html_document_by_llm(
     )
     html_text = "".join(chunks).strip()
     extracted = _extract_html_document(html_text)
-    if extracted:
+    if extracted and not _report_html_has_render_artifacts(extracted):
         return extracted
 
     fragment = _extract_html_from_json_like_text(html_text) or html_text
     wrapped = _wrap_html_fragment_as_document(fragment)
-    if wrapped:
+    if wrapped and not _report_html_has_render_artifacts(wrapped):
         return wrapped
     return ""
 

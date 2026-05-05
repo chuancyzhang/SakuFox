@@ -1336,6 +1336,16 @@ function normalizeReportHtmlDocument(rawText) {
     return match ? match[0].trim() : "";
   };
 
+  const hasReportRenderArtifacts = (htmlText) => {
+    const raw = String(htmlText || "");
+    if (!raw.trim()) return true;
+    const visible = raw
+      .replace(/<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>/gi, " ")
+      .replace(/<[^>]+>/g, "\n");
+    return /\\u[0-9a-fA-F]{4}|\\[ntr]|"html_document"\s*:|"chart_bindings"\s*:|\{\s*"title"\s*:|�|(?:Ã|Â|å|æ|ç|è|é|ä){2,}/i.test(visible)
+      || /&lt;\s*(?:!doctype|\/?html|\/?body|\/?div|\/?table)/i.test(raw);
+  };
+
   const tryParseJsonLike = (candidate) => {
     try {
       const parsed = JSON.parse(candidate);
@@ -1350,30 +1360,33 @@ function normalizeReportHtmlDocument(rawText) {
   };
 
   let html = tryParseJsonLike(text);
-  if (html) return html;
+  if (html && !hasReportRenderArtifacts(html)) return html;
 
   const firstBrace = text.indexOf("{");
   const lastBrace = text.lastIndexOf("}");
   if (firstBrace >= 0 && lastBrace > firstBrace) {
     html = tryParseJsonLike(text.slice(firstBrace, lastBrace + 1));
-    if (html) return html;
+    if (html && !hasReportRenderArtifacts(html)) return html;
   }
 
   const htmlField = text.match(/"html_document"\s*:\s*"([\s\S]*?)"\s*(?:,\s*"chart_bindings"|,\s*"summary"|,\s*"title"|,\s*"legacy_markdown"|\})/i);
   if (htmlField && htmlField[1]) {
     try {
       const rawHtml = JSON.parse(`"${htmlField[1]}"`).trim();
-      return extractStandaloneHtml(rawHtml) || rawHtml;
+      const html = extractStandaloneHtml(rawHtml) || rawHtml;
+      return hasReportRenderArtifacts(html) ? "" : html;
     } catch (_) {
       const rawHtml = htmlField[1].trim();
-      return extractStandaloneHtml(rawHtml) || rawHtml;
+      const html = extractStandaloneHtml(rawHtml) || rawHtml;
+      return hasReportRenderArtifacts(html) ? "" : html;
     }
   }
 
   const htmlBlock = text.match(/<!doctype html[\s\S]*?<\/html>|<html[\s\S]*?<\/html>/i);
-  if (htmlBlock) return htmlBlock[0].trim();
+  if (htmlBlock && !hasReportRenderArtifacts(htmlBlock[0])) return htmlBlock[0].trim();
 
   if (text.startsWith("{") || text.startsWith("[")) return "";
+  if (/"html_document"\s*:|"chart_bindings"\s*:|\\u[0-9a-fA-F]{4}|&lt;\s*(?:!doctype|\/?html)/i.test(text)) return "";
 
   return `<!doctype html><html lang="zh-CN"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>Report</title><style>body{font-family:Inter,Arial,sans-serif;margin:24px;color:#111827;background:#fff;}pre{white-space:pre-wrap;line-height:1.6;}</style></head><body><pre>${escapeHtml(text)}</pre></body></html>`;
 }
